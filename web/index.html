@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MacNas · 原理与设计</title>
+<link rel="icon" href="logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="bg-deco" aria-hidden="true"></div>
+
+<header class="topbar glass">
+  <div class="topbar-inner">
+    <a class="brand" href="#top">
+      <img src="logo.png" alt="MacNas" class="brand-logo">
+      <span class="brand-text">
+        <strong>MacNas</strong>
+        <small>原理与设计</small>
+      </span>
+    </a>
+    <nav class="topnav">
+      <a href="#why">为什么</a>
+      <a href="#storage">存储</a>
+      <a href="#format">格式契约</a>
+      <a href="#server">服务器</a>
+      <a href="#webdav">WebDAV</a>
+      <a href="#web">网页端</a>
+      <a href="#preview">预览</a>
+      <a href="#share">分享</a>
+      <a href="#security">安全</a>
+      <a href="#tests">测试</a>
+    </nav>
+    <div class="topbar-actions">
+      <a class="btn text" href="#structure">目录结构</a>
+      <button class="icon-btn" id="theme-btn" title="切换深浅色" aria-label="切换深浅色"></button>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ======================= 首屏 ======================= -->
+  <section class="hero">
+    <div class="hero-card glass">
+      <img src="logo.png" alt="" class="hero-logo">
+      <h1>MacNas</h1>
+      <p class="hero-lead">
+        一个跑在自己 Mac 上的私人 NAS。没有第三方依赖，
+        文件按内容哈希去重存储，逻辑目录只存在于索引里 ——
+        所以同一份内容无论放多少次、跨几个目录，磁盘上都只有一份。
+      </p>
+      <div class="hero-tags">
+        <span class="tag-pill">SwiftUI 原生</span>
+        <span class="tag-pill">零第三方依赖</span>
+        <span class="tag-pill">内容寻址去重</span>
+        <span class="tag-pill">冻结的磁盘格式</span>
+        <span class="tag-pill">网页桌面 + WebDAV</span>
+      </div>
+      <div class="hero-actions">
+        <a class="btn filled" href="#storage">从原理看起</a>
+        <a class="btn text" href="#structure">看目录结构</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 为什么 ======================= -->
+  <section id="why" class="block">
+    <div class="section-head">
+      <span class="section-index">01</span>
+      <div>
+        <h2>先讲清楚：为什么不直接把文件放进文件夹</h2>
+        <p class="section-sub">这是整个设计的地基，其它所有取舍都从这里推导出来。</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>
+        最常见的做法是让磁盘结构和你在网页里看到的目录一一对应：网页里的 <code>/照片/2026/海边.jpg</code>
+        就等于磁盘上的 <code>document/照片/2026/海边.jpg</code>。这样最直观，但会带来三个绕不过去的问题：
+      </p>
+      <div class="cards three">
+        <article class="card">
+          <div class="card-icon" data-icon="copy"></div>
+          <h3>重复内容占多份</h3>
+          <p>同一个文件复制到两个目录，磁盘就存两份。用户的「复制」和「备份」习惯会让占用迅速膨胀，
+             而你其实只需要保留一份内容 + 两条指向它的记录。</p>
+        </article>
+        <article class="card">
+          <div class="card-icon" data-icon="move"></div>
+          <h3>改名与移动变成真搬字节</h3>
+          <p>移动一个 8GB 的目录要真的把 8GB 读出来再写回去，慢、费电、还容易在中途失败留下半个状态。</p>
+        </article>
+        <article class="card">
+          <div class="card-icon" data-icon="lock"></div>
+          <h3>结构一旦定下就难改</h3>
+          <p>如果磁盘结构 = 用户看到的目录，那任何一次「目录语义调整」都等于一次全盘数据迁移。</p>
+        </article>
+      </div>
+      <p class="callout">
+        <strong>MacNas 的选择：</strong>把「内容」和「名字」彻底分开。
+        磁盘上只存内容（按内容哈希命名），
+        你看到的目录树只是一份索引记录 —— 于是复制不占空间、改名移动只改一行 JSON、删除只需减引用计数。
+      </p>
+    </div>
+  </section>
+
+  <!-- ======================= 存储 ======================= -->
+  <section id="storage" class="block">
+    <div class="section-head">
+      <span class="section-index">02</span>
+      <div>
+        <h2>存储原理：内容寻址 + 索引记录</h2>
+        <p class="section-sub">每个目录（卷）里只有两份东西：<code>document/</code> 存内容，<code>info/</code> 存记录。</p>
+      </div>
+    </div>
+
+    <div class="diagram glass">
+      <div class="diagram-title">一个已初始化的目录（卷）</div>
+      <pre class="tree">/Users/你/我的资料            <span class="c-dim">← 你选的目录</span>
+├── document/                 <span class="c-dim">← 只有内容，按哈希分桶</span>
+│   └── blobs/
+│       ├── b3/
+│       │   └── 25d290026b65fcf5a8fc87c1ef088f…1e53.docx
+│       └── 7f/
+│           └── 83a1c9e4…（另一份内容）
+└── info/                     <span class="c-dim">← 只有记录</span>
+    ├── index.json            <span class="c-dim">← 逻辑目录树 + 文件记录</span>
+    ├── index.json.bak        <span class="c-dim">← 上一次的可用副本</span>
+    ├── volume.json           <span class="c-dim">← 这个目录的身份标记</span>
+    └── shares.json           <span class="c-dim">← 分享链接</span></pre>
+      <p class="diagram-note">
+        注意：磁盘上<strong>没有</strong> <code>照片/</code>、<code>项目/</code> 这些文件夹。
+        它们只活在 <code>info/index.json</code> 里。哈希前两位做目录（<code>b3/</code>）只是为了
+        避免一个目录塞进几十万个文件。
+      </p>
+    </div>
+
+    <div class="grid two">
+      <div class="panel glass">
+        <h3>一次上传发生了什么</h3>
+        <ol class="steps">
+          <li><strong>边收边算哈希</strong>：请求体直接流式落盘到临时文件，同时增量计算 SHA-256（不占内存）。</li>
+          <li><strong>查重</strong>：拿到哈希先看 <code>document/blobs/&lt;前两位&gt;/&lt;完整哈希&gt;</code> 是否已存在。</li>
+          <li><strong>命中就丢弃临时文件</strong>：内容已经在库里了，只写一条记录 —— 这一步就是「秒传」和「去重」。</li>
+          <li><strong>未命中则改名入库</strong>：把临时文件原子地移动到哈希路径。</li>
+          <li><strong>写记录</strong>：在 <code>info/index.json</code> 里加一条
+              <code>{id, name, logicalPath, sha256, size, createdAt}</code>。</li>
+        </ol>
+        <p class="note">记录里的 <code>logicalPath</code> 才是「它在哪个目录、叫什么名字」。</p>
+      </div>
+
+      <div class="panel glass">
+        <h3>四个日常操作的真实代价</h3>
+        <table class="table">
+          <thead><tr><th>操作</th><th>实际发生的事</th><th>是否搬字节</th></tr></thead>
+          <tbody>
+            <tr><td>上传重复内容</td><td>算哈希 → 命中 → 只写一条记录</td><td class="no">不搬</td></tr>
+            <tr><td>复制文件/文件夹</td><td>新增记录（内容引用计数 +1）</td><td class="no">不搬</td></tr>
+            <tr><td>改名 / 移动</td><td>改记录里的 <code>logicalPath</code></td><td class="no">不搬</td></tr>
+            <tr><td>删除一份</td><td>删记录，引用计数归零才删内容</td><td class="maybe">可能删</td></tr>
+          </tbody>
+        </table>
+        <p class="note">
+          去重是<strong>跨所有已添加目录的全局去重</strong>：同一个内容在 A 盘和 B 盘只需要存一份，
+          记录里会标明它实际落在哪个卷上。
+        </p>
+      </div>
+    </div>
+
+    <div class="diagram glass">
+      <div class="diagram-title">逻辑目录树 ↔ 物理内容</div>
+      <div class="mapping">
+        <pre class="tree small">网页里看到的
+/
+├── 照片/
+│   ├── 海边.jpg      <span class="c-dim">sha256 = 7f83a1…</span>
+│   └── 备份/
+│       └── 海边.jpg  <span class="c-dim">sha256 = 7f83a1…（同一个哈希！）</span>
+└── 项目/
+    └── 报告.docx     <span class="c-dim">sha256 = b325d2…</span></pre>
+        <div class="arrow-col"><span class="arrow">→</span></div>
+        <pre class="tree small">磁盘上真实存在的
+document/blobs/
+├── 7f/83a1c9e4…      <span class="c-ok">1 份内容，被 2 条记录引用</span>
+└── b3/25d290026…     <span class="c-ok">1 份内容，被 1 条记录引用</span></pre>
+      </div>
+      <p class="diagram-note">
+        两张「海边.jpg」在网页上是两个文件，在磁盘上只有一份。
+        删除其中一张，另一张照样能打开；两张都删掉，内容才会被回收。
+      </p>
+    </div>
+  </section>
+
+  <!-- ======================= 格式契约 ======================= -->
+  <section id="format" class="block">
+    <div class="section-head">
+      <span class="section-index">03</span>
+      <div>
+        <h2>冻结的磁盘契约：让后续更新不改动已有数据</h2>
+        <p class="section-sub">磁盘格式一旦发布就不能乱动 —— 用户的资料已经在里面了。</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>MacNas 把「磁盘长什么样」当成一份对外契约固定下来，用五条规则保证任何新版本都能安全地读写老数据：</p>
+      <div class="rules">
+        <article class="rule glass">
+          <span class="rule-no">1</span>
+          <div>
+            <h3>卷根只允许两份东西</h3>
+            <p><code>document/</code> 与 <code>info/</code>。不新增第三种顶层目录，也不改名。
+               名字写在 <code>StorageLayout</code> 里作为常量，代码任何地方都不许拼字符串绕过它。</p>
+          </div>
+        </article>
+        <article class="rule glass">
+          <span class="rule-no">2</span>
+          <div>
+            <h3>字段只增不改、不删</h3>
+            <p>新增能力只能<strong>增加</strong> JSON 字段。已有的字段名、含义、类型永不改变 ——
+               老版本读到新字段不认识时，会原样保留而不是丢掉。</p>
+          </div>
+        </article>
+        <article class="rule glass">
+          <span class="rule-no">3</span>
+          <div>
+            <h3>未知字段原样保留</h3>
+            <p>写入索引前会做一次「合并」：新版本不认识的老字段、以及其它工具写进去的自定义字段，
+               都会原封不动地写回去。这样多个版本交替打开同一个目录也不会互相破坏。</p>
+          </div>
+        </article>
+        <article class="rule glass">
+          <span class="rule-no">4</span>
+          <div>
+            <h3>版本号 + 只读降级</h3>
+            <p>每份索引都带 <code>formatVersion</code>（当前为 1）。
+               如果打开了一个<em>比自己更新</em>的版本，MacNas 会<strong>只读挂载</strong>：
+               浏览、下载、预览都正常，任何写入操作返回 409，一个字节都不改。</p>
+          </div>
+        </article>
+        <article class="rule glass">
+          <span class="rule-no">5</span>
+          <div>
+            <h3>索引可以丢，内容不能丢</h3>
+            <p>因为文件名就是内容哈希，所以就算 <code>info/index.json</code> 彻底损坏，
+               也能扫描 <code>document/blobs/</code> 重建出记录（文件名 → 哈希 → 大小）。
+               写入时先写临时文件再原子替换，并保留上一份 <code>index.json.bak</code> 兜底。</p>
+          </div>
+        </article>
+      </div>
+      <p class="callout">
+        这套约定的意义：<strong>软件的升级永远不会要求用户迁移数据</strong>。
+        新功能要么是新增字段（老版本忽略它），要么是新增只读能力；
+        不会出现「升级后旧目录打不开」或「老版本打开新目录把数据写坏」。
+      </p>
+    </div>
+  </section>
+
+  <!-- ======================= 服务器 ======================= -->
+  <section id="server" class="block">
+    <div class="section-head">
+      <span class="section-index">04</span>
+      <div>
+        <h2>服务器：手写 HTTP/1.1，零第三方依赖</h2>
+        <p class="section-sub">用系统自带的 Network.framework 从 TCP 开始实现，不引入任何包。</p>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <div class="panel glass">
+        <h3>请求是怎么被处理的</h3>
+        <ol class="steps">
+          <li><code>NWListener</code> 监听端口，每条新连接<strong>分配独立队列</strong>（这一点很关键，见下）。</li>
+          <li>字节流先做 HTTP/1.1 解析：请求行、头部、Cookie、查询参数。</li>
+          <li>请求体按需处理：普通接口读进内存（有限额），上传则交给流式落盘 + 增量哈希的 sink。</li>
+          <li>路由分发：静态资源 → 网页壳；<code>/api/…</code> → 业务接口（需要登录态）；<code>/dav</code> → WebDAV。</li>
+          <li>响应支持普通长度与文件流：下载/预览走文件流，并支持 <code>Range</code> 断点续传。</li>
+        </ol>
+      </div>
+
+      <div class="panel glass">
+        <h3>三个踩过坑才定下来的细节</h3>
+        <div class="detail">
+          <h4>每条连接一个队列</h4>
+          <p>最初所有连接共用一条串行队列，结果是：macOS 挂载 WebDAV 时会同时开十几条连接探测，
+             排在后面的被前面的请求堵住而超时，挂载直接失败。改成每连接独立队列后才正常。</p>
+        </div>
+        <div class="detail">
+          <h4>密码验证必须够快</h4>
+          <p>PBKDF2 用系统 CommonCrypto 实现（输出与手写实现逐位一致，所以老配置不用迁移），
+             单次从 182ms 降到 15ms —— 因为 macOS 的 WebDAV 客户端对单个请求只有约 300ms 容忍上限。</p>
+        </div>
+        <div class="detail">
+          <h4>上传不经过内存</h4>
+          <p>大文件上传时请求体直接写入临时文件并同时计算哈希，内存占用与文件大小无关。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel glass wide">
+      <h3>接口一览</h3>
+      <table class="table">
+        <thead><tr><th>方法</th><th>路径</th><th>作用</th></tr></thead>
+        <tbody>
+          <tr><td>POST</td><td><code>/api/login</code> · <code>/api/logout</code></td><td>登录，发放会话 Cookie</td></tr>
+          <tr><td>GET</td><td><code>/api/volumes</code> · <code>/api/list</code></td><td>目录列表与卷（已添加目录）信息</td></tr>
+          <tr><td>POST</td><td><code>/api/upload</code></td><td>流式上传 + 去重</td></tr>
+          <tr><td>GET</td><td><code>/api/download</code></td><td>下载（支持 Range）</td></tr>
+          <tr><td>GET</td><td><code>/api/preview</code> · <code>/api/preview/content</code></td><td>预览信息与预览内容</td></tr>
+          <tr><td>POST</td><td><code>/api/mkdir</code> · <code>/api/rename</code> · <code>/api/delete</code> · <code>/api/transfer</code></td><td>新建目录、改名、删除、复制/移动</td></tr>
+          <tr><td>GET</td><td><code>/api/search</code></td><td>全局搜索（文件名与路径，多关键词）</td></tr>
+          <tr><td>POST/GET</td><td><code>/api/share/create</code> · <code>/api/shares</code></td><td>创建与管理分享链接</td></tr>
+          <tr><td>ALL</td><td><code>/dav</code></td><td>WebDAV（Finder 挂载）</td></tr>
+          <tr><td>GET</td><td><code>/api/pub/&lt;token&gt;/…</code></td><td>分享页匿名访问：信息、密码校验、下载、预览</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= WebDAV ======================= -->
+  <section id="webdav" class="block">
+    <div class="section-head">
+      <span class="section-index">05</span>
+      <div>
+        <h2>WebDAV：把逻辑目录树挂载成网络磁盘</h2>
+        <p class="section-sub">Finder 里 ⌘K → <code>http://你的IP:端口/dav</code>，就能像本地磁盘一样读写。</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>
+        WebDAV 直接实现在同一个 HTTP 服务器里，映射的不是磁盘上的哈希文件，而是
+        <code>info/index.json</code> 里的<strong>逻辑目录树</strong>。所有写操作走的还是同一套去重管线，
+        所以从 Finder 拖进去的文件同样会自动查重、并立刻出现在网页端。
+      </p>
+      <div class="grid two">
+        <div class="panel glass">
+          <h3>挂载时的握手顺序</h3>
+          <ol class="steps mono">
+            <li><code>OPTIONS /dav</code> — 客户端探测服务器能力（<strong>必须免认证返回 200</strong>）</li>
+            <li><code>OPTIONS /dav/</code> — 文件系统层接手</li>
+            <li><code>PROPFIND /dav/</code> — 列目录 → 此时才返回 401 挑战</li>
+            <li>客户端弹出账号密码框 / 用已保存的凭据重试</li>
+            <li><code>PROPFIND</code> → 207 目录清单，挂载完成</li>
+          </ol>
+        </div>
+        <div class="panel glass">
+          <h3>一个反直觉的坑</h3>
+          <p>
+            第一版里，未认证的 <code>OPTIONS</code> 也返回 401。结果是 Finder 在「手上还没有凭据」时
+            会一直重试这个探测请求，最后直接报「连接服务器出现问题」，
+            <strong>永远不会走到弹密码框那一步</strong>。
+          </p>
+          <p class="note">
+            对照实验：同一个响应体，由「要求认证」的服务器发出 → 客户端只发 3 个请求就放弃；
+            由「OPTIONS 免认证」的服务器发出 → 客户端立刻推进到 PROPFIND。
+            所以现在 <code>OPTIONS</code> 免认证返回能力声明（只暴露协议能力，不含任何文件信息）。
+          </p>
+        </div>
+      </div>
+      <div class="panel glass wide">
+        <h3>支持的方法</h3>
+        <p class="mono wrap">
+          OPTIONS · GET · HEAD · PUT · MKCOL · DELETE · MOVE · COPY · PROPFIND · PROPPATCH · LOCK · UNLOCK
+        </p>
+        <p class="note">
+          支持 <code>Range</code>（拖动播放/断点续传）与 ETag；
+          <code>LOCK</code> 返回合法锁令牌但不做真正互斥（单用户私人 NAS 够用，
+          但能让 Office / Finder 保存时不拒绝写入）。
+          只读模式下浏览下载正常，写操作一律 403。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 网页端 ======================= -->
+  <section id="web" class="block">
+    <div class="section-head">
+      <span class="section-index">06</span>
+      <div>
+        <h2>网页端：桌面隐喻 + 布局记忆</h2>
+        <p class="section-sub">打开网址就是一个「桌面」：图标、任务栏、可拖拽可缩放的窗口。</p>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <div class="panel glass">
+        <h3>窗口系统</h3>
+        <ul class="bullets">
+          <li>可以同时开多个「文件管理」窗口，窗口之间能直接<strong>拖拽搬运</strong>文件。</li>
+          <li>窗口标题跟着当前目录走，任务栏显示所有窗口并可最小化/切换。</li>
+          <li>右键有完整菜单：预览、下载、复制/剪切/粘贴、创建副本、复制到…、分享、重命名、删除。</li>
+          <li>上传是队列化的：可以一次拖很多文件，面板里显示进度与结果。</li>
+          <li>支持 <code>⌘K</code> 全局搜索，命中关键词高亮，点结果直接跳到所在目录。</li>
+        </ul>
+      </div>
+      <div class="panel glass">
+        <h3>布局记忆</h3>
+        <p>
+          网页会记住你<strong>开着哪些窗口、各自的位置与大小、层叠顺序</strong>，
+          以及每个文件管理窗口停在哪个卷的哪个目录。下次打开网页或重新登录，自动还原，
+          不用每次重新摆一遍。
+        </p>
+        <ul class="bullets">
+          <li>状态存在浏览器本地（<code>localStorage</code>），保存在服务端的只有你的文件。</li>
+          <li>关网页、切到后台、退出登录前会立刻落盘，最后的拖动也不会丢。</li>
+          <li>任务栏右侧的图标可以随时关掉记忆，关掉时同时清掉已保存的布局。</li>
+          <li>换屏幕尺寸后恢复会做边界收敛，窗口不会跑到看不见的地方。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 预览 ======================= -->
+  <section id="preview" class="block">
+    <div class="section-head">
+      <span class="section-index">07</span>
+      <div>
+        <h2>预览：只用系统自带能力，什么都不用装</h2>
+        <p class="section-sub">照片、视频、PDF、文本、Word、表格、幻灯片，桌面和分享页都能直接看。</p>
+      </div>
+    </div>
+
+    <div class="panel glass wide">
+      <table class="table">
+        <thead><tr><th>文件类型</th><th>怎么预览</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>图片（jpg / png / heic / webp …）</td><td>直接给原图</td><td>可切换「适应窗口 / 原始尺寸」</td></tr>
+          <tr><td>视频 / 音频（mp4 / mov / mp3 / flac …）</td><td>浏览器原生播放器</td><td>走 <code>Range</code>，可拖动进度、边下边播</td></tr>
+          <tr><td>PDF</td><td>浏览器内置阅读器</td><td>沙箱 iframe</td></tr>
+          <tr><td>文本 / 代码 / CSV / JSON / Markdown</td><td>服务器读出文本</td><td>UTF-8 → GB18030 → Latin-1 兜底，中文老文件也能看</td></tr>
+          <tr><td>Word / RTF / ODT</td><td><code>textutil</code> 转成 HTML</td><td>段落与表格都保留，放进沙箱 iframe（脚本被禁用）</td></tr>
+          <tr><td>Excel / PPT / Pages / Keynote …</td><td><code>qlmanage</code>（系统 QuickLook）出图</td><td>显示第一页的渲染图，完整内容请下载后用对应软件打开</td></tr>
+        </tbody>
+      </table>
+      <p class="note">
+        转换结果按<strong>内容哈希</strong>缓存：同一个文件第二次打开是瞬时的；缓存超过 256MB 会自动清理最旧的。
+        转换进程都有硬超时，卡住的进程会被结束，不会把服务器拖死。
+      </p>
+    </div>
+  </section>
+
+  <!-- ======================= 分享 ======================= -->
+  <section id="share" class="block">
+    <div class="section-head">
+      <span class="section-index">08</span>
+      <div>
+        <h2>分享链接：给文件或文件夹发一个地址</h2>
+        <p class="section-sub">对方不需要账号，打开网址就能浏览、预览、下载。</p>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <div class="panel glass">
+        <h3>怎么做的</h3>
+        <ul class="bullets">
+          <li>每次分享生成一个随机 <strong>token</strong>，链接形如 <code>/s/&lt;token&gt;</code>。</li>
+          <li>可以设访问密码；校验通过后只发一个带哈希的 Cookie，密码本身不落 Cookie。</li>
+          <li>可以设有效期，或选择永久有效。</li>
+          <li>分享文件夹时，访问范围被限制在该目录内 —— 请求别的路径会被拒绝。</li>
+          <li>分享页同样可以使用预览与下载，界面和桌面端用同一套渲染逻辑。</li>
+          <li>随时可以撤销；撤销后链接立即 410。</li>
+        </ul>
+      </div>
+      <div class="panel glass">
+        <h3>边界在哪</h3>
+        <p>
+          分享链接只能<strong>读</strong>。上传、改名、删除这些能改变数据的操作在分享页上不存在，
+          接口也不接受 —— 一条链接泄漏了也只是泄漏了它指向的那些文件。
+        </p>
+        <p class="note">
+          账号密码与端口只能在 Mac 应用里修改，网页端（包括分享页）没有任何入口可以改它们。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 安全 ======================= -->
+  <section id="security" class="block">
+    <div class="section-head">
+      <span class="section-index">09</span>
+      <div>
+        <h2>安全与隐私</h2>
+        <p class="section-sub">你的文件始终在自己的机器上。</p>
+      </div>
+    </div>
+    <div class="cards three">
+      <article class="card">
+        <div class="card-icon" data-icon="shield"></div>
+        <h3>数据不出本机</h3>
+        <p>没有云、没有账号体系、没有遥测。文件存在你选的目录里，服务只在你指定的端口上监听。</p>
+      </article>
+      <article class="card">
+        <div class="card-icon" data-icon="key"></div>
+        <h3>密码只存哈希</h3>
+        <p>账号密码用 PBKDF2-HMAC-SHA256（随机盐 + 10 万次迭代）保存，不保存明文；
+           改密码会注销所有网页登录。</p>
+      </article>
+      <article class="card">
+        <div class="card-icon" data-icon="warn"></div>
+        <h3>WebDAV 走明文</h3>
+        <p>WebDAV 使用 HTTP Basic 认证，密码在局域网内是明文传输。
+           建议只在可信网络里开启，或自行加一层 HTTPS 反向代理。</p>
+      </article>
+      <article class="card">
+        <div class="card-icon" data-icon="camera"></div>
+        <h3>照片收集</h3>
+        <p>生成一条链接发给朋友，他们<strong>不用注册登录</strong>就能上传照片，可以限制单个文件大小与总量、设有效期与密码。
+           收集链接<strong>只进不出</strong>：访客看不到也下载不了已收到的照片；同名照片自动改名。</p>
+      </article>
+      <article class="card">
+        <div class="card-icon" data-icon="bolt"></div>
+        <h3>格式 v2：追加日志</h3>
+        <p>改动只往 <code>info/index.log</code> 追加一小段，不再每次重写整份索引。实测 5,000 个文件：单次写入
+           <strong>74.5ms → 5.6ms</strong>，写 5,000 条 <strong>173 秒 → 14 秒</strong>。
+           老目录不会被自动升级，旧版软件打开 v2 目录只读，结构始终不变。</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ======================= 测试 ======================= -->
+  <section id="tests" class="block">
+    <div class="section-head">
+      <span class="section-index">10</span>
+      <div>
+        <h2>怎么确认它真的可靠</h2>
+        <p class="section-sub">所有关键行为都有自动化测试守着，包括「磁盘结构不许变」这种约束。</p>
+      </div>
+    </div>
+    <div class="grid three">
+      <div class="panel glass">
+        <h3>核心自测</h3>
+        <p class="mono">Tools/e2e/selftest</p>
+        <p>密码哈希兼容老配置、SHA-256 标准向量、路径穿越与非法名称、磁盘格式约定，
+           以及一条<strong>性能守卫</strong>：PBKDF2 单次必须小于 150ms，否则 Finder 挂载会超时。</p>
+      </div>
+      <div class="panel glass">
+        <h3>接口行为测试</h3>
+        <p class="mono">Tools/e2e/run.sh</p>
+        <p>上传去重、覆盖不丢记录、改名、删除与引用计数、跨卷复制移动、搜索、分享范围与密码、
+           WebDAV 全套方法与只读模式、重启后自动读回记录。</p>
+      </div>
+      <div class="panel glass">
+        <h3>界面与稳定性</h3>
+        <p class="mono">Tools/e2e/webui.sh · stability.sh</p>
+        <p>用系统 WebKit 真正渲染网页，做点击命中测试、拖拽搬运、搜索、布局记忆、预览；
+           稳定性套件则反复读写并校验索引不损坏。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 目录结构 ======================= -->
+  <section id="structure" class="block">
+    <div class="section-head">
+      <span class="section-index">11</span>
+      <div>
+        <h2>代码结构</h2>
+        <p class="section-sub">一个 Xcode 工程，没有外部依赖。</p>
+      </div>
+    </div>
+    <div class="diagram glass">
+      <pre class="tree">MacNas/
+├── MacNas/
+│   ├── App/                     <span class="c-dim">SwiftUI 界面：引导、主界面、设置、日志</span>
+│   ├── Core/                    <span class="c-dim">与界面无关的核心逻辑</span>
+│   │   ├── Store.swift           <span class="c-dim">去重存储：上传/复制/移动/删除/搜索/重建索引</span>
+│   │   ├── Schema.swift          <span class="c-dim">磁盘格式契约：版本、字段清单、未知字段保留</span>
+│   │   ├── IndexFile.swift       <span class="c-dim">索引读写：原子替换 + .bak 兜底</span>
+│   │   ├── ShareStore.swift      <span class="c-dim">分享链接与访问密码</span>
+│   │   └── Crypto.swift          <span class="c-dim">SHA-256、PBKDF2（CommonCrypto）、随机数</span>
+│   ├── Server/                  <span class="c-dim">HTTP 服务器</span>
+│   │   ├── HTTPServer.swift      <span class="c-dim">监听与连接（每连接一个队列）</span>
+│   │   ├── HTTPConnection.swift  <span class="c-dim">请求解析与响应写出</span>
+│   │   ├── Router.swift          <span class="c-dim">路由、鉴权、全部接口</span>
+│   │   ├── WebDAV.swift          <span class="c-dim">WebDAV 服务端</span>
+│   │   ├── Preview.swift         <span class="c-dim">预览：类型判断、textutil/qlmanage、缓存</span>
+│   │   └── FileResponse.swift    <span class="c-dim">文件流响应（Range / ETag）</span>
+│   └── Web/                     <span class="c-dim">网页端（原生 JS，无框架）</span>
+│       ├── index.html
+│       ├── app.js                <span class="c-dim">窗口系统、文件管理、预览、分享页</span>
+│       └── styles.css            <span class="c-dim">Material 风格 · 蓝色主色 · 毛玻璃</span>
+├── Tools/e2e/                   <span class="c-dim">测试与检查工具</span>
+│   ├── selftest/                 <span class="c-dim">核心自测</span>
+│   ├── run.sh · webui.sh · stability.sh
+│   ├── webcheck/                 <span class="c-dim">用 WebKit 渲染网页并截图/跑场景</span>
+│   └── fixtures/                 <span class="c-dim">预览测试用的真实文件</span>
+├── docs/
+│   └── FORMAT.md                 <span class="c-dim">磁盘格式契约（对外承诺）</span>
+└── web/                          <span class="c-dim">← 你正在看的这个介绍站点</span></pre>
+    </div>
+  </section>
+
+  <!-- ======================= 收尾 ======================= -->
+  <section class="block">
+    <div class="finale glass">
+      <h2>一句话总结</h2>
+      <p>
+        MacNas 把「内容」和「名字」拆开：内容按哈希只存一份，名字和目录结构放在一份可演进、
+        可重建、永不破坏兼容的索引里。磁盘结构被冻结成契约，所以升级永远不需要你搬数据；
+        去重发生在最底层，所以复制不占空间、改名移动不搬字节。
+      </p>
+      <div class="hero-actions">
+        <a class="btn filled" href="#top">回到顶部</a>
+        <a class="btn text" href="#storage">再看一遍存储原理</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <span>MacNas · 私人 NAS · 原理与设计</span>
+    <span class="c-dim">本页是纯静态说明，与软件本身一起放在仓库里</span>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

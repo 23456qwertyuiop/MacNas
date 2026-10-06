@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>MacNas</title>
+<link rel="icon" href="/logo.png">
+<link rel="apple-touch-icon" href="/logo.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0B57D0">
+<!-- 加到主屏后全屏运行，像原生应用一样 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="MacNas">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="wallpaper" aria-hidden="true"><span class="blob b1"></span><span class="blob b2"></span><span class="blob b3"></span><span class="blob b4"></span></div>
+
+<!-- 锁屏（登录） -->
+<section id="lockscreen" class="lockscreen hidden">
+  <div class="glass login-card">
+    <div class="brand">
+      <span class="brand-mark"><img src="/logo.png" alt="MacNas"></span>
+      <div>
+        <h1>MacNas</h1>
+        <p>私有盘 · 桌面</p>
+      </div>
+    </div>
+    <form id="login-form" autocomplete="on">
+      <label class="field">
+        <span>账号</span>
+        <input id="login-user" name="username" autocomplete="username" required>
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn filled block" type="submit" id="login-submit">登录</button>
+      <p id="login-error" class="form-error" hidden></p>
+    </form>
+    <p class="login-hint">账号与密码只能在 Mac 上的 MacNas 软件里修改</p>
+  </div>
+</section>
+
+<!-- 分享页（匿名访问，不需要登录） -->
+<div id="share-view" class="share-page hidden"></div>
+
+<!-- 桌面 -->
+<div id="desktop" class="desktop hidden">
+  <div class="desktop-area" id="desktop-area">
+    <div class="desktop-icons" id="desktop-icons"></div>
+    <div class="window-layer" id="window-layer"></div>
+  </div>
+
+  <footer class="taskbar glass">
+    <button class="tb-apps" id="tb-apps" title="应用列表">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+        <rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/>
+        <rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>
+      </svg>
+      <span>应用</span>
+    </button>
+    <div class="tb-tasks" id="tb-tasks"></div>
+    <div class="tb-right">
+      <span class="chip" id="tb-stats" hidden></span>
+      <span class="chip" id="tb-user" hidden></span>
+      <button class="icon-btn" id="session-btn" title="记住窗口布局" aria-label="记住窗口布局"></button>
+      <button class="icon-btn" id="theme-btn" title="切换深浅色" aria-label="切换深浅色"></button>
+      <button class="icon-btn" id="logout-btn" title="退出登录" aria-label="退出登录"></button>
+    </div>
+  </footer>
+</div>
+
+<div id="app-launcher" class="launcher glass hidden"></div>
+<div id="upload-panel" class="upload-panel glass hidden"></div>
+<div id="dialog-layer"></div>
+<div id="snackbar"></div>
+<input id="file-input" type="file" multiple hidden>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+MacNas 发布包（由 Tools/package.sh 生成）
+
+MacNas-arm64.zip
+  适用：Apple 芯片（M 系列）
+  架构：arm64 ｜ 最低系统：macOS 14.0
+  大小：0.9 MB
+  SHA-256：bb6dd2dbbcba3a620568d5290f21c3634d3bacec05cb60bb074e7639ccf1a5e2
+
+MacNas-x86_64.zip
+  适用：Intel 芯片
+  架构：x86_64 ｜ 最低系统：macOS 14.0
+  大小：1.0 MB
+  SHA-256：2a068d61fccf57b34271365c5e13bfe5a88c4b17a12433abfa3e33432232e5ab
+
+安装：解压后把 MacNas.app 拖进「应用程序」文件夹，双击即可。
+首次打开如果提示来自身份不明的开发者，在「系统设置 → 隐私与安全性」里点「仍要打开」。
+两个包内容完全相同，只是目标芯片不同；用错架构也能靠 Rosetta 运行，但原生更快。

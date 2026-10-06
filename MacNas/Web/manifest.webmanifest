@@ -1,0 +1,16 @@
+{
+  "name": "MacNas",
+  "short_name": "MacNas",
+  "description": "跑在自己 Mac 上的私人 NAS：内容按哈希去重，网页桌面 + WebDAV",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F7F9FC",
+  "theme_color": "#0B57D0",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "/logo.png", "sizes": "256x256", "type": "image/png", "purpose": "any" },
+    { "src": "/logo.png", "sizes": "256x256", "type": "image/png", "purpose": "maskable" }
+  ]
+}
