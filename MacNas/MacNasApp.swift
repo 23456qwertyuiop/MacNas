@@ -49,6 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 关掉最后一个窗口不退出：网站要继续服务其它设备
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    // 不要让系统保存/恢复窗口状态：这个 App 允许「窗口关掉、服务继续跑」，
+    // 一旦系统照着「上次没有窗口」恢复，启动后就会什么都不出现（看着像软件打不开）。
+    func applicationShouldSaveApplicationState(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldRestoreApplicationState(_ sender: NSApplication) -> Bool { false }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { Self.bringMainWindowToFront(sender) }
         NSApp.activate(ignoringOtherApps: true)
@@ -60,6 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 窗口有可能自己不出来（用户看到的就是「点了没反应」）。
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            Self.bringMainWindowToFront(NSApp)
+        }
+        // 兜底：万一还是没窗口（系统变化、状态异常），稍后再叫一次
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             Self.bringMainWindowToFront(NSApp)
         }
         // 极端情况：窗口被恢复到一块已经不存在的显示器上（外面拔了外接屏），

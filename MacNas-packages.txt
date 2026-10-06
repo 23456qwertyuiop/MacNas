@@ -4,14 +4,18 @@ MacNas-arm64.zip
   适用：Apple 芯片（M 系列）
   架构：arm64 ｜ 最低系统：macOS 14.0
   大小：0.9 MB
-  SHA-256：bb6dd2dbbcba3a620568d5290f21c3634d3bacec05cb60bb074e7639ccf1a5e2
+  SHA-256：a6572633e60dace377adec4afa0a0a3bc1b95d30fe20f8a930288adc5fa3519c
 
 MacNas-x86_64.zip
   适用：Intel 芯片
   架构：x86_64 ｜ 最低系统：macOS 14.0
   大小：1.0 MB
-  SHA-256：2a068d61fccf57b34271365c5e13bfe5a88c4b17a12433abfa3e33432232e5ab
+  SHA-256：c4349c4529a8ce682e470c0adadde6339dc4bd1292060541bc6e9d2de0c7d3a6
 
 安装：解压后把 MacNas.app 拖进「应用程序」文件夹，双击即可。
 首次打开如果提示来自身份不明的开发者，在「系统设置 → 隐私与安全性」里点「仍要打开」。
-两个包内容完全相同，只是目标芯片不同；用错架构也能靠 Rosetta 运行，但原生更快。
+两个包内容相同，只是目标芯片不同；装错架构在 Apple 芯片上也能靠 Rosetta 运行。
+
+为什么最低是 macOS 14：实测（连 10 行的最小 SwiftUI 程序也一样）发现，用当前工具链把
+部署目标设到 14 以下时，SwiftUI 在 macOS 27 上不会创建任何窗口 —— 界面完全不出现，
+属于能装但打不开的坏包。要继续往下支持，需要把窗口管理从 SwiftUI App 换成 AppKit。

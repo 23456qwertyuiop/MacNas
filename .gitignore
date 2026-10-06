@@ -1,8 +1,6 @@
 # Xcode / 构建产物
-.build/
-.build14-*/
-.build-pkg-*/
-.build-intel*/
+# 各种临时构建目录（.build / .build14-arm64 / .build-diag12 …）
+.build*/
 
 build/
 DerivedData/
