@@ -872,42 +872,71 @@ function showUploadMenu(view, button) {
   ]);
 }
 
-/** 选整个文件夹：会按原有目录结构在目标位置建好目录 */
-function pickFolder(view) {
+/** 打开系统文件选择器（选文件 / 选文件夹 / 拍照都走这里）。
+ *
+ *  注意：iOS Safari 要求 input 元素**已经挂在文档里**，click() 才会真正弹出选择器。
+ *  只 createElement 不 appendChild 的话，手机上第一次点击会被静默忽略 ——
+ *  表现就是「点了上传，照片根本没进列表」。这个坑必须靠 appendChild 绕开。
+ */
+function openFilePicker(options) {
   const input = document.createElement('input');
   input.type = 'file';
-  input.multiple = true;
-  input.setAttribute('webkitdirectory', '');
-  input.setAttribute('directory', '');
+  if (options.accept) input.accept = options.accept;
+  if (options.multiple) input.multiple = true;
+  if (options.directory) {
+    input.setAttribute('webkitdirectory', '');
+    input.setAttribute('directory', '');
+  }
+  if (options.capture) input.setAttribute('capture', options.capture);
+  input.style.display = 'none';
+  input.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(input);
+  let done = false;
+  const cleanup = () => {
+    if (done) return;
+    done = true;
+    try { input.remove(); } catch (e) { /* 忽略 */ }
+  };
   input.addEventListener('change', () => {
     const files = [...input.files].filter(Boolean);
-    if (!files.length) return;
-    // webkitRelativePath 形如「我的文件夹/子目录/文件.txt」，第一段是选择的根目录本身，
-    // 这里把根目录也保留下来，结构完全一致
-    const entries = files.map((file) => {
-      const relative = file.webkitRelativePath || file.name;
-      const parts = relative.split('/');
-      parts.pop();
-      return { file, relPath: parts.join('/') };
-    });
-    enqueueUploads(entries, view.volumeId, view.path);
-    snackbar('已加入 ' + entries.length + ' 个文件（保留目录结构）', 'ok');
+    cleanup();
+    if (files.length) options.onFiles(files);
   });
+  // 用户取消时不会触发 change，用一个兜底定时器收掉隐藏节点
+  setTimeout(cleanup, 120000);
   input.click();
+  return input;
+}
+
+/** 选整个文件夹：会按原有目录结构在目标位置建好目录 */
+function pickFolder(view) {
+  openFilePicker({
+    multiple: true,
+    directory: true,
+    onFiles: (files) => {
+      // webkitRelativePath 形如「我的文件夹/子目录/文件.txt」，第一段是选择的根目录本身，
+      // 这里把根目录也保留下来，结构完全一致
+      const entries = files.map((file) => {
+        const relative = file.webkitRelativePath || file.name;
+        const parts = relative.split('/');
+        parts.pop();
+        return { file, relPath: parts.join('/') };
+      });
+      enqueueUploads(entries, view.volumeId, view.path);
+      snackbar('已加入 ' + entries.length + ' 个文件（保留目录结构）', 'ok');
+    }
+  });
 }
 
 function pickPhotos(view) {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*,video/*';
-  input.multiple = true;
-  input.setAttribute('capture', 'environment');
-  input.addEventListener('change', () => {
-    const files = [...input.files].filter(Boolean);
-    if (!files.length) return;
-    enqueueUploads(files.map((file) => ({ file, relPath: '' })), view.volumeId, view.path);
+  openFilePicker({
+    accept: 'image/*,video/*',
+    multiple: true,
+    capture: 'environment',
+    onFiles: (files) => {
+      enqueueUploads(files.map((file) => ({ file, relPath: '' })), view.volumeId, view.path);
+    }
   });
-  input.click();
 }
 
 /** 当前加载的前端版本（资源地址上的内容指纹）。
@@ -3575,12 +3604,12 @@ function renderCollectPage(data, token) {
   }
 
   drop.addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = data.imagesOnly ? 'image/*,video/*' : '*/*';
-    input.multiple = true;
-    input.addEventListener('change', () => uploadFiles(input.files));
-    input.click();
+    // 走统一入口：手机上必须先把 input 挂进文档，点击才会弹出选择器
+    openFilePicker({
+      accept: data.imagesOnly ? 'image/*,video/*' : '*/*',
+      multiple: true,
+      onFiles: (files) => uploadFiles(files)
+    });
   });
   bindCollectDrop(drop, uploadFiles);
 
@@ -4092,6 +4121,7 @@ async function openTrashManager() {
 
 /** 桌面图标上的回收站数量角标 */
 function refreshTrashBadge() {
+  // 桌面图标没了，角标挂在「应用」列表的回收站那一项上
   const badge = document.getElementById('trash-badge');
   if (!badge) return;
   const count = state.trashCount || 0;
@@ -4269,7 +4299,7 @@ function buildPreviewContent(meta, state) {
 }
 
 /** 预览窗口的工具栏 */
-function buildPreviewToolbar(win, meta, state, onScaleChange, downloadURL) {
+function buildPreviewToolbar(win, meta, state, onScaleChange, downloadURL, onClose) {
   const bar = el('div', 'pv-toolbar');
   const info = el('div', 'pv-info');
   info.appendChild(el('div', 'pv-name', meta.name || '预览'));
@@ -4299,7 +4329,14 @@ function buildPreviewToolbar(win, meta, state, onScaleChange, downloadURL) {
     if (meta.download) window.location.href = meta.download;
   });
   actions.appendChild(download);
-  if (!win.isSharePreview) {
+  // 关闭按钮：桌面预览窗口和分享页浮层都要有。
+  // 分享页以前只靠 Esc 或点浮层外部关闭，手机上根本关不掉 —— 这里补上明确的按钮。
+  if (onClose) {
+    const close = el('button', 'btn text pv-close');
+    close.innerHTML = ICONS.close + '<span>关闭</span>';
+    close.addEventListener('click', onClose);
+    actions.appendChild(close);
+  } else if (!win.isSharePreview) {
     const close = iconButton(ICONS.close, '关闭', () => WM.close(win));
     actions.appendChild(close);
   }
@@ -4360,6 +4397,13 @@ async function openSharePreview(token, file) {
   const state = { scale: 'fit', canScale: false };
   overlay.appendChild(shell);
   overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+  // 除了工具栏里的「关闭」，右上角再放一个 ×：内容很长或工具栏换行时也能一眼看到
+  const corner = el('button', 'pv-corner-close');
+  corner.innerHTML = ICONS.close;
+  corner.title = '关闭';
+  corner.setAttribute('aria-label', '关闭预览');
+  corner.addEventListener('click', (event) => { event.stopPropagation(); close(); });
+  overlay.appendChild(corner);
   const onKey = (event) => { if (event.key === 'Escape') close(); };
   function close() {
     document.removeEventListener('keydown', onKey);
@@ -4375,9 +4419,9 @@ async function openSharePreview(token, file) {
     shell.textContent = '';
     shell.appendChild(buildPreviewToolbar(fakeWin, meta, state, () => {
       shell.textContent = '';
-      shell.appendChild(buildPreviewToolbar(fakeWin, meta, state, () => {}, meta.download));
+      shell.appendChild(buildPreviewToolbar(fakeWin, meta, state, () => {}, meta.download, close));
       shell.appendChild(buildPreviewContent(meta, state));
-    }, meta.download));
+    }, meta.download, close));
     shell.appendChild(buildPreviewContent(meta, state));
   } catch (err) {
     shell.textContent = '';
@@ -4386,30 +4430,13 @@ async function openSharePreview(token, file) {
   return overlay;
 }
 
+/** 桌面不再放应用图标：应用入口只保留左下角的「应用」按钮。
+    这里留一个空实现，是为了兼容历史上调用它的地方。 */
 function renderDesktopIcons() {
   const box = $('desktop-icons');
-  box.textContent = '';
-  [APPS.files, APPS.photos, APPS.analytics, APPS.search, APPS.shares, APPS.trash, APPS.about].forEach((app) => {
-    const button = el('button', 'desk-icon');
-    const art = el('div', 'di-art');
-    art.innerHTML = app.icon;
-    button.appendChild(art);
-    button.appendChild(el('div', 'di-name', app.name));
-    if (app.id === 'trash') {
-      const badge = el('span', 'di-badge');
-      badge.id = 'trash-badge';
-      setVisible(badge, false);
-      button.appendChild(badge);
-    }
-    // 单击即打开（网页里双击容易让人以为“点不动”），同时给出选中反馈
-    button.addEventListener('click', () => {
-      box.querySelectorAll('.desk-icon').forEach((node) => node.classList.remove('selected'));
-      button.classList.add('selected');
-      openApp(app.id);
-    });
-    box.appendChild(button);
-  });
+  if (box) box.textContent = '';
 }
+
 
 function openApp(appId, session) {
   const saved = session || null;
@@ -4449,10 +4476,17 @@ function renderLauncher() {
   box.textContent = '';
   [APPS.files, APPS.photos, APPS.analytics, APPS.search, APPS.shares, APPS.trash, APPS.about].forEach((app) => {
     const button = el('button', 'launcher-item');
+    button.dataset.app = app.id;      // 给测试和自动化用，避免靠文字匹配
     const art = el('div', 'li-art');
     art.innerHTML = app.icon;
     button.appendChild(art);
     button.appendChild(el('span', null, app.name));
+    if (app.id === 'trash') {
+      const badge = el('span', 'li-badge');
+      badge.id = 'trash-badge';
+      setVisible(badge, false);
+      button.appendChild(badge);
+    }
     button.addEventListener('click', () => {
       setVisible(box, false);
       openApp(app.id);

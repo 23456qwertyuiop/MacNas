@@ -177,10 +177,10 @@ const hit = (node) => {
   return top === node || node.contains(top);
 };
 
-[...document.querySelectorAll('.desk-icon')].forEach((icon, index) => {
-  push('桌面图标可点击 #' + (index + 1) + '（' + icon.querySelector('.di-name').textContent + '）', hit(icon));
-});
-push('任务栏「应用」可点击', hit(document.getElementById('tb-apps')));
+push('桌面上已经没有任何应用图标', document.querySelectorAll('.desk-icon').length === 0,
+  '还剩 ' + document.querySelectorAll('.desk-icon').length + ' 个');
+push('桌面图标容器也已移除', !document.getElementById('desktop-icons'));
+push('左下角「应用」按钮可点击', hit(document.getElementById('tb-apps')));
 push('主题切换按钮可点击', hit(document.getElementById('theme-btn')));
 push('退出登录按钮可点击', hit(document.getElementById('logout-btn')));
 push('窗口关闭按钮可点击', hit(w.win.node.querySelector('.win-btn.close')));
@@ -196,17 +196,24 @@ push('文件列表里能看到上传的文件', [...w.listEl.querySelectorAll('.
   [...w.listEl.querySelectorAll('.row-name')].map(n => n.textContent).join(','));
 
 const before = document.querySelectorAll('.win').length;
-const shareIcon = [...document.querySelectorAll('.desk-icon')].find(b => b.querySelector('.di-name').textContent === '分享管理');
-if (shareIcon) shareIcon.click();
+// 现在唯一入口是左下角的「应用」面板
+document.getElementById('tb-apps').click();
+await wait(500);
+const shareItem = [...document.querySelectorAll('#app-launcher .launcher-item')]
+  .find(b => b.textContent.trim() === '分享管理');
+if (shareItem) shareItem.click();
 await wait(900);
 const opened = [...document.querySelectorAll('.win-title-text')].map(n => n.textContent);
-push('点击桌面图标能打开窗口', document.querySelectorAll('.win').length > before && opened.includes('分享管理'), opened.join(','));
+push('从「应用」面板能打开窗口', document.querySelectorAll('.win').length > before && opened.includes('分享管理'), opened.join(','));
 push('分享管理里列出了分享链接', document.querySelectorAll('.win .row').length >= 2,
   String(document.querySelectorAll('.win .row').length));
 
-// 打开「系统信息」：它的应用图标是图片，最容易出现“图标爆炸”
-const aboutIcon = [...document.querySelectorAll('.desk-icon')].find(b => b.querySelector('.di-name').textContent === '系统信息');
-if (aboutIcon) aboutIcon.click();
+// 打开「系统信息」：它有图片类图标，最容易出现“图标爆炸”
+document.getElementById('tb-apps').click();
+await wait(400);
+const aboutItem = [...document.querySelectorAll('#app-launcher .launcher-item')]
+  .find(b => b.textContent.trim() === '系统信息');
+if (aboutItem) aboutItem.click();
 await wait(900);
 const iconNodes = [...document.querySelectorAll(
   '.tb-task img, .tb-task svg, .win-title img, .win-title svg, .di-art img, .di-art svg, .li-art img, .li-art svg'
@@ -660,15 +667,24 @@ const W = window.innerWidth;
 
 push('识别为窄屏（手机）模式', document.body.classList.contains('narrow'), '宽度=' + W);
 
-const icons = [...document.querySelectorAll('.desk-icon')];
-push('桌面图标在手机上仍在', icons.length >= 4, '图标数=' + icons.length);
-if (icons.length >= 2) {
-  const first = icons[0].getBoundingClientRect();
-  const second = icons[1].getBoundingClientRect();
-  push('图标并排成两列（同一行、左右分开）', second.top === first.top && second.left > first.left,
-    '第一个 left=' + Math.round(first.left) + ' 第二个 left=' + Math.round(second.left) +
-    ' / top=' + Math.round(first.top) + ',' + Math.round(second.top));
+push('手机上桌面上没有应用图标', document.querySelectorAll('.desk-icon').length === 0);
+const appsBtn = document.getElementById('tb-apps');
+const appsRect = appsBtn.getBoundingClientRect();
+push('手机上左下角「应用」按钮够大', appsRect.width >= 30 && appsRect.height >= 30,
+  Math.round(appsRect.width) + 'x' + Math.round(appsRect.height) + ' 位置 ' + Math.round(appsRect.left) + ',' + Math.round(appsRect.top));
+appsBtn.click();
+await wait(600);
+const launcher = document.getElementById('app-launcher');
+push('手机上「应用」面板能弹出', !launcher.classList.contains('hidden') && getComputedStyle(launcher).display !== 'none',
+  'class=' + launcher.className + ' display=' + getComputedStyle(launcher).display);
+push('面板里有全部 7 个应用', launcher.querySelectorAll('.launcher-item').length === 7,
+  String(launcher.querySelectorAll('.launcher-item').length));
+if (launcher.querySelectorAll('.launcher-item').length) {
+  const first = launcher.querySelector('.launcher-item').getBoundingClientRect();
+  push('面板里的项目手指点得到', first.height >= 30, Math.round(first.width) + 'x' + Math.round(first.height));
 }
+appsBtn.click();
+await wait(300);
 
 // 打开文件管理：应当铺满整屏
 const view = MacNas.openFileManager({ volumeId: v, path: '/资料' });
@@ -886,26 +902,22 @@ await wait(1400);
 const wins = () => [...document.querySelectorAll('.win')].map(w => w.querySelector('.win-title-text').textContent);
 const closeAll = async () => { MacNas.WM.closeAll(); await wait(350); };
 
-// ---------- 逐个点桌面图标（就是用户的真实操作）----------
-const expected = {
-  '文件管理': '文件管理',
-  '照片': '照片',
-  '存储分析': '存储分析',
-  '全局搜索': '全局搜索',
-  '分享管理': '分享管理',
-  '回收站': '回收站',
-  '系统信息': '系统信息'
-};
-for (const [label, titlePrefix] of Object.entries(expected)) {
-  await closeAll();
-  const icon = [...document.querySelectorAll('.desk-icon')]
-    .find(b => b.querySelector('.di-name') && b.querySelector('.di-name').textContent === label);
-  if (!icon) { push('桌面图标「' + label + '」存在', false); continue; }
-  icon.click();
-  await wait(1700);
-  const opened = wins().some(t => t.startsWith(titlePrefix));
-  push('点桌面图标「' + label + '」能打开窗口', opened, wins().join(' | '));
-}
+// 每个应用点开后，窗口标题应该长这样
+const expected = [
+  ['files', '文件管理', '文件管理'],
+  ['photos', '照片', '照片'],
+  ['analytics', '存储分析', '存储分析'],
+  ['search', '全局搜索', '全局搜索'],
+  ['shares', '分享管理', '分享管理'],
+  ['trash', '回收站', '回收站'],
+  ['about', '系统信息', '系统信息']
+];
+
+// ---------- 桌面已经没有图标，唯一的应用入口是左下角「应用」 ----------
+await closeAll();
+push('桌面上没有应用图标了', document.querySelectorAll('.desk-icon').length === 0,
+  '还剩 ' + document.querySelectorAll('.desk-icon').length + ' 个');
+push('桌面上也没有图标容器了', !document.getElementById('desktop-icons'));
 
 // ---------- 左下角「应用」按钮 ----------
 await closeAll();
@@ -922,12 +934,11 @@ push('应用列表里有全部应用',
   [...launcher.querySelectorAll('.launcher-item')].map(i => i.textContent).join(','));
 
 // 从应用列表里逐个打开
-for (const [label, titlePrefix] of Object.entries(expected)) {
+for (const [appId, label, titlePrefix] of expected) {
   await closeAll();
   appsButton.click();
   await wait(600);
-  const item = [...launcher.querySelectorAll('.launcher-item')]
-    .find(b => b.textContent.trim() === label);
+  const item = launcher.querySelector('.launcher-item[data-app="' + appId + '"]');
   if (!item) { push('应用列表里有「' + label + '」', false); continue; }
   item.click();
   await wait(1700);
@@ -963,6 +974,171 @@ return JSON.stringify({ checks });
 JS
 say "桌面图标与应用列表（按用户点击路径）"
 run_scenario "图标与应用列表" "$WORK/s19.js" "$BASE/" 1440 900
+
+cat > "$WORK/s20.js" <<'JS'
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+const checks = [];
+const push = (name, ok, detail) => checks.push({ name, ok: !!ok, detail: String(detail === undefined ? '' : detail) });
+await wait(900);
+
+const overlays = () => [...document.querySelectorAll('.pv-overlay')];
+const overlay = () => overlays()[0] || null;
+const toolbarClose = () => {
+  const box = overlay();
+  if (!box) return null;
+  return [...box.querySelectorAll('.pv-toolbar .btn')].find(b => b.textContent.trim() === '关闭') || null;
+};
+const cornerClose = () => overlay() && overlay().querySelector('.pv-corner-close');
+
+async function waitForRow(timeoutMs) {
+  const deadline = Date.now() + (timeoutMs || 8000);
+  for (;;) {
+    const cells = [...document.querySelectorAll('.share-file, .row, .grid-cell')];
+    const target = cells.find(c => c.textContent.includes('示例图片.png'));
+    if (target) return target;
+    if (Date.now() > deadline) return null;
+    await wait(200);
+  }
+}
+
+/** 打开预览，并等到「工具栏出现」或「出现错误文案」为止 */
+async function openPreviewAndSettle() {
+  const row = await waitForRow(8000);
+  if (!row) return '找不到图片行';
+  (row.querySelector('.row-main') || row).click();
+  const deadline = Date.now() + 9000;
+  while (Date.now() < deadline) {
+    const box = overlay();
+    if (box && (box.querySelector('.pv-toolbar') || /预览失败/.test(box.textContent))) break;
+    await wait(150);
+  }
+  const box = overlay();
+  if (!box) return '浮层没出现';
+  if (/预览失败/.test(box.textContent)) return '预览失败：' + box.textContent.replace(/\s+/g, ' ').slice(0, 100);
+  return '';
+}
+
+async function closeAll() {
+  for (const box of overlays()) {
+    const cross = box.querySelector('.pv-corner-close');
+    if (cross) cross.click();
+    else box.remove();
+    await wait(150);
+  }
+  await wait(200);
+}
+
+// ---------- 第一次打开：工具栏里应当有「关闭」 ----------
+let problem = await openPreviewAndSettle();
+push('分享页能打开图片预览（工具栏已就绪）', problem === '', problem);
+push('预览里内容真的渲染出来了', !!overlay() && !!overlay().querySelector('.pv-content, .pv-image, .pv-frame, .pv-text, .pv-audio, .pv-video'),
+  overlay() ? overlay().textContent.replace(/\s+/g, ' ').slice(0, 80) : '无浮层');
+
+const btn = toolbarClose();
+push('预览工具栏里有「关闭」按钮', !!btn,
+  btn ? btn.textContent.trim() : ('工具栏按钮：[' + (overlay() ? [...overlay().querySelectorAll('.pv-toolbar button')].map(b => b.textContent.trim()).join(',') : '') + ']'));
+if (btn) {
+  const r = btn.getBoundingClientRect();
+  push('「关闭」按钮可见且够大', r.width >= 40 && r.height >= 24,
+    Math.round(r.width) + 'x' + Math.round(r.height) + ' 位置 ' + Math.round(r.left) + ',' + Math.round(r.top));
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  push('「关闭」按钮没有被挡住', !!top && (top === btn || btn.contains(top)), top ? top.tagName + '.' + (top.className || '') : '取不到');
+}
+
+const cross = cornerClose();
+push('右上角还有一个常驻的 ×', !!cross, cross ? Math.round(cross.getBoundingClientRect().width) + 'px' : '没有');
+if (cross) {
+  const r = cross.getBoundingClientRect();
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  push('右上角 × 点得到（没被内容盖住）', !!top && (top === cross || cross.contains(top)), top ? top.tagName + '.' + (top.className || '') : '取不到');
+}
+
+// ---------- 点工具栏「关闭」 ----------
+if (btn) {
+  btn.click();
+  await wait(600);
+  push('点工具栏「关闭」能关掉预览', overlays().length === 0, '剩余浮层 ' + overlays().length);
+}
+
+// ---------- 再开一次，点右上角 × ----------
+await closeAll();
+problem = await openPreviewAndSettle();
+push('能再次打开预览', problem === '', problem);
+if (cornerClose()) {
+  cornerClose().click();
+  await wait(700);
+  push('点右上角 × 能关掉预览', overlays().length === 0, '剩余浮层 ' + overlays().length);
+}
+
+// ---------- Esc 仍然可以关（旧行为别坏） ----------
+await closeAll();
+problem = await openPreviewAndSettle();
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+await wait(700);
+push('Esc 仍然能关闭预览', overlays().length === 0, '剩余浮层 ' + overlays().length);
+await closeAll();
+return JSON.stringify({ checks });
+JS
+say "分享页预览的关闭入口"
+run_scenario "分享页关闭按钮" "$WORK/s20.js" "$BASE/s/$PREVIEW_TOKEN" 1200 820
+run_scenario "分享页关闭按钮（手机）" "$WORK/s20.js" "$BASE/s/$PREVIEW_TOKEN" 390 844
+
+cat > "$WORK/s21.js" <<'JS'
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+const checks = [];
+const push = (name, ok, detail) => checks.push({ name, ok: !!ok, detail: String(detail === undefined ? '' : detail) });
+await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ username: 'admin', password: 'test1234' }) });
+const session = await fetch('/api/session').then(r => r.json());
+await showDesktop(session.username);
+await wait(1200);
+const view = MacNas.openFileManager({ volumeId: MacNas.state.volumes[0].id, path: '/' });
+await wait(1400);
+
+function pickers() { return [...document.querySelectorAll('body > input[type=file]')]; }
+function lastPicker() { const list = pickers(); return list[list.length - 1]; }
+
+// 打开上传菜单
+const uploadBtn = [...view.listEl.parentElement.querySelectorAll('.fm-actions .btn')]
+  .find(b => b.textContent.trim().startsWith('上传'));
+push('工具栏有「上传」按钮', !!uploadBtn, uploadBtn ? uploadBtn.textContent.trim() : '无');
+uploadBtn.click();
+await wait(500);
+const menuItems = [...document.querySelectorAll('.context-menu .ctx-item')].map(i => i.textContent.trim());
+push('上传菜单里有「上传文件 / 上传文件夹 / 拍照上传」',
+  menuItems.some(t => t.includes('上传文件')) && menuItems.some(t => t.includes('上传文件夹')) && menuItems.some(t => t.includes('拍照')),
+  menuItems.join(','));
+
+// 上传文件夹
+let before = pickers().length;
+[...document.querySelectorAll('.context-menu .ctx-item')].find(i => i.textContent.includes('上传文件夹')).click();
+await wait(500);
+let picker = lastPicker();
+push('选文件夹会挂出隐藏的目录选择器', pickers().length > before && !!picker && picker.hasAttribute('webkitdirectory'),
+  picker ? ('webkitdirectory=' + picker.hasAttribute('webkitdirectory') + ' multiple=' + picker.multiple) : '没挂出');
+if (picker) picker.remove();
+
+// 拍照上传
+uploadBtn.click();
+await wait(400);
+before = pickers().length;
+[...document.querySelectorAll('.context-menu .ctx-item')].find(i => i.textContent.includes('拍照')).click();
+await wait(500);
+picker = lastPicker();
+push('拍照上传会挂出带 capture 的选择器', pickers().length > before && !!picker && picker.getAttribute('capture') === 'environment',
+  picker ? ('capture=' + picker.getAttribute('capture') + ' accept=' + picker.accept) : '没挂出');
+if (picker) picker.remove();
+
+// 上传文件走页面里那个常驻 input（本来就在文档里）
+uploadBtn.click();
+await wait(400);
+[...document.querySelectorAll('.context-menu .ctx-item')].find(i => i.textContent.includes('上传文件')).click();
+await wait(400);
+push('选文件用的是常驻 input（在文档里）', !!document.getElementById('file-input'), '缺少 #file-input');
+return JSON.stringify({ checks });
+JS
+say "上传选择器在手机上能被挂出来（iOS 关键修复）"
+run_scenario "上传选择器" "$WORK/s21.js" "$BASE/" 1440 900
 
 cat > "$WORK/s17.js" <<'JS'
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
@@ -1079,6 +1255,15 @@ const items = [...document.querySelectorAll('.collect-item')];
 push('同名照片也能上传成功（自动改名）', items.length === 2 && items[1].classList.contains('done'),
   items.map(i => i.className + ':' + i.textContent.slice(0, 24)).join(' | '));
 push('两次上传后计数为 2', !!hint && hint.textContent.includes('已收到 2 张'), hint ? hint.textContent : '无');
+
+// 点上传区会打开系统选择器：input 必须已经挂在文档里，否则 iOS 第一次点击会被静默忽略
+const before = document.querySelectorAll('body > input[type=file]').length;
+drop.click();
+await wait(500);
+const pickers = [...document.querySelectorAll('body > input[type=file]')];
+push('点上传区会挂出一个隐藏的文件选择器（iOS 关键修复）', pickers.length > before,
+  '挂出的 input: ' + pickers.length + ' 个 ｜ multiple=' + (pickers[0] ? pickers[0].multiple : '-') +
+  ' accept=' + (pickers[0] ? pickers[0].accept : '-'));
 return JSON.stringify({ checks });
 JS
 say "照片收集（访客上传页）"
