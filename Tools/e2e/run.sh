@@ -501,6 +501,83 @@ check "收集：图文收集也接受非图片" "201" \
 check "收集：分享管理里能看到收集统计" "1" \
   "$(api "$BASE/api/shares" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(1 if any("uploadedCount" in s for s in d["shares"]) else 0)')"
 
+say "第三方开发者 API（/api/v1）"
+API_BASE="$BASE/api/v1"
+# 用网页会话（管理员）创建 API Key
+KEY_RW_JSON=$(api -X POST -H 'Content-Type: application/json' -d '{"name":"自动化脚本","scopes":["read","write"],"expiresInDays":30}' "$BASE/api/admin/keys")
+KEY_RW=$(echo "$KEY_RW_JSON" | json_field 'd["key"]["key"]')
+KEY_RW_ID=$(echo "$KEY_RW_JSON" | json_field 'd["key"]["id"]')
+KEY_RO_JSON=$(api -X POST -H 'Content-Type: application/json' -d '{"name":"只读看板","scopes":["read"]}' "$BASE/api/admin/keys")
+KEY_RO=$(echo "$KEY_RO_JSON" | json_field 'd["key"]["key"]')
+check "API：创建 key 返回明文一次" "1" "$(echo "$KEY_RW" | grep -c '^macnas_' )"
+check "API：新建 key 带权限范围" "read,write" "$(echo "$KEY_RW_JSON" | json_field '",".join(d["key"]["scopes"])')"
+check "API：key 列表里不含完整明文" "0" \
+  "$(api "$BASE/api/admin/keys" | python3 -c '
+import json,sys
+raw = sys.stdin.read()
+print(1 if "'"$KEY_RW"'".strip() and "'"$KEY_RW"'" in raw else 0)')"
+
+# 未带凭据 / 错误凭据
+check "API：不带凭据返回 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' "$API_BASE/volumes")"
+check "API：错误 key 返回 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer macnas_deadbeef' "$API_BASE/volumes")"
+check "API：错误格式统一（error.code）" "unauthorized" \
+  "$(curl -s "$API_BASE/volumes" | json_field 'd["error"]["code"]')"
+
+# 读接口
+check "API：me 返回调用者与权限" "自动化脚本" "$(curl -s -H "Authorization: Bearer $KEY_RW" "$API_BASE/me" | json_field 'd["caller"]')"
+check "API：列目录可用" "200" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY_RW" "$API_BASE/files?volume=$V1&path=%2F")"
+check "API：volumes 可用" "1" "$(curl -s -H "Authorization: Bearer $KEY_RW" "$API_BASE/volumes" | python3 -c 'import json,sys;print(1 if len(json.load(sys.stdin)["volumes"]) >= 1 else 0)')"
+
+# 只读 key 不能写
+check "API：只读 key 写操作被拒（403）" "403" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY_RO" -H 'Content-Type: application/json' \
+     -d "$(printf '{"volume":"%s","path":"/","name":"越权"}' "$V1")" "$API_BASE/folders")"
+check "API：只读被拒时错误码可读" "read_only_key" \
+  "$(curl -s -H "Authorization: Bearer $KEY_RO" -H 'Content-Type: application/json' \
+     -d "$(printf '{"volume":"%s","path":"/","name":"越权"}' "$V1")" "$API_BASE/folders" | json_field 'd["error"]["code"]')"
+
+# 读写 key 走完整流程
+api -o /dev/null -H "Authorization: Bearer $KEY_RW" -H 'Content-Type: application/json' \
+  -d "$(printf '{"volume":"%s","path":"/","name":"API目录"}' "$V1")" "$API_BASE/folders"
+check "API：能用 key 建目录" "1" \
+  "$(api "$BASE/api/list?volume=$V1&path=%2F" | python3 -c 'import json,sys;print(1 if any(f["name"]=="API目录" for f in json.load(sys.stdin)["folders"]) else 0)')"
+printf '第三方 API 写入的内容\n' > "$WORK/api-up.txt"
+curl -s -H "Authorization: Bearer $KEY_RW" -X POST --data-binary @"$WORK/api-up.txt" \
+  "$API_BASE/files/upload?volume=$V1&path=/API目录&name=hello.txt" -o "$WORK/api-up.json"
+API_FILE_ID=$(python3 -c 'import json;print(json.load(open("'"$WORK"'/api-up.json"))["file"]["id"])' 2>/dev/null)
+check "API：能用 key 上传" "hello.txt" "$(python3 -c 'import json;print(json.load(open("'"$WORK"'/api-up.json"))["file"]["name"])' 2>/dev/null)"
+curl -s -H "Authorization: Bearer $KEY_RW" "$API_BASE/files/download?volume=$V1&id=$API_FILE_ID" -o "$WORK/api-back.txt"
+check "API：能下载且内容一致" "$(shasum -a 256 "$WORK/api-up.txt" | awk '{print $1}')" "$(shasum -a 256 "$WORK/api-back.txt" | awk '{print $1}')"
+check "API：同名上传自动改名（不给开发者添麻烦）" "hello (2).txt" \
+  "$(curl -s -H "Authorization: Bearer $KEY_RW" -X POST --data-binary @"$WORK/api-up.txt" \
+     "$API_BASE/files/upload?volume=$V1&path=/API目录&name=hello.txt" | json_field 'd["file"]["name"]')"
+check "API：能改名" "200" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY_RW" -H 'Content-Type: application/json' \
+     -d "$(printf '{"volume":"%s","id":"%s","name":"renamed.txt"}' "$V1" "$API_FILE_ID")" "$API_BASE/files/rename")"
+check "API：能搜索" "1" \
+  "$(curl -s -H "Authorization: Bearer $KEY_RW" "$API_BASE/search?q=renamed" | python3 -c 'import json,sys;print(1 if len(json.load(sys.stdin)["results"]) >= 1 else 0)')"
+# 缩略图：先传一张真图片，再按 id 取
+curl -s -H "Authorization: Bearer $KEY_RW" -X POST --data-binary @"$ROOT/Tools/e2e/fixtures/示例图片.png" \
+  "$API_BASE/files/upload?volume=$V1&path=/API目录&name=thumb.png" -o "$WORK/api-thumb.json"
+THUMB_ID=$(python3 -c 'import json;print(json.load(open("'"$WORK"'/api-thumb.json"))["file"]["id"])' 2>/dev/null)
+THUMB_CODE=$(curl -s -H "Authorization: Bearer $KEY_RW" -o "$WORK/api-thumb.jpg" -w '%{http_code}' \
+  "$API_BASE/thumbnails?volume=$V1&id=$THUMB_ID&size=128")
+check "API：能取缩略图（图片）" "200" "$THUMB_CODE"
+check "API：缩略图是真正的 JPEG 字节" "1" \
+  "$(python3 -c 'print(1 if open("'"$WORK"'/api-thumb.jpg","rb").read(2) == b"\xff\xd8" else 0)')"
+TRASH_BEFORE=$(api "$BASE/api/status" | json_field 'd["trashCount"]')
+check "API：DELETE 删除进回收站" "200" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $KEY_RW" "$API_BASE/files?volume=$V1&id=$API_FILE_ID")"
+check "API：删除后回收站里多了一项" "1" \
+  "$(api "$BASE/api/status" | python3 -c 'import json,sys;print(1 if json.load(sys.stdin)["trashCount"] > '"$TRASH_BEFORE"' else 0)')"
+check "API：未知接口返回 404 且带提示" "not_found" "$(curl -s -H "Authorization: Bearer $KEY_RW" "$API_BASE/nope" | json_field 'd["error"]["code"]')"
+
+# 撤销后立刻失效
+api -o /dev/null -X POST -H 'Content-Type: application/json' -d "$(printf '{"id":"%s"}' "$KEY_RW_ID")" "$BASE/api/admin/keys/revoke"
+check "API：撤销后该 key 立刻失效" "401" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY_RW" "$API_BASE/me")"
+check "API：限流生效（压 700 次只读，应出现 429）" "1" \
+  "$(for i in $(seq 1 700); do curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $KEY_RO" "$API_BASE/me"; done | grep -c 429 | python3 -c 'import sys;print(1 if int(sys.stdin.read().strip() or 0) > 0 else 0)')"
+
 say "空间分析"
 printf '分析用重复内容\n' > "$WORK/an-same.txt"
 printf '分析用另一份内容\n' > "$WORK/an-other.txt"

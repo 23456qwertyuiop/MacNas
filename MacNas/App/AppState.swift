@@ -39,6 +39,8 @@ final class AppState {
     var toast: String?
 
     let store: Store
+    /// 第三方开发者 API 的 key 存储（设置页里管理）
+    let apiKeys: APIKeyStore
     let auth: AuthManager
     let environment: ServerEnvironment
     let shares: ShareStore
@@ -55,7 +57,9 @@ final class AppState {
         let auth = AuthManager()
         let environment = ServerEnvironment()
         let shares = ShareStore()
-        let router = Router(store: store, auth: auth, environment: environment, shares: shares)
+        let apiKeys = APIKeyStore()
+        let router = Router(store: store, auth: auth, environment: environment, shares: shares, apiKeys: apiKeys)
+        self.apiKeys = apiKeys
 
         self.configStore = configStore
         self.store = store
@@ -117,6 +121,7 @@ final class AppState {
         environment.webdavEnabled = config.webdavEnabled
         environment.webdavReadOnly = config.webdavReadOnly
         environment.trashRetentionDays = config.trashRetentionDays
+        environment.setAPICORSOrigins(config.apiCorsOrigins)
         // 启动时清理过期的回收站项（保留天数在设置里可改）
         if config.trashRetentionDays > 0 {
             _ = store.pruneExpiredTrash(olderThanDays: config.trashRetentionDays)
@@ -392,11 +397,37 @@ final class AppState {
         }
     }
 
+    /// 生成一把第三方 API Key（明文只在返回值里出现一次）
+    func createAPIKey(name: String, scopes: [String], expiresInDays: Int?) -> APIKeyCreation? {
+        do {
+            let created = try apiKeys.create(name: name, scopes: scopes, expiresInDays: expiresInDays)
+            LogCenter.shared.info("已生成 API Key：\(created.record.name)")
+            return created
+        } catch {
+            lastError = "生成 API Key 失败：\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func revokeAPIKey(id: String) {
+        _ = apiKeys.revoke(id: id)
+    }
+
+    var apiKeysList: [APIKeyRecord] { apiKeys.all() }
+
+    /// 设置允许跨域调用 API 的来源（逗号分隔；空 = 不开 CORS）
+    func setAPICORSOrigins(_ origins: [String]) {
+        config.apiCorsOrigins = origins
+        environment.setAPICORSOrigins(origins)
+        persist()
+    }
+
     /// 回收站保留天数（超期自动清理；0 = 不自动清理）
     func setTrashRetention(days: Int) {
         config.trashRetentionDays = max(0, days)
         persist()
         environment.trashRetentionDays = config.trashRetentionDays
+        environment.setAPICORSOrigins(config.apiCorsOrigins)
         LogCenter.shared.info("回收站保留期已设为 \(config.trashRetentionDays) 天")
     }
 

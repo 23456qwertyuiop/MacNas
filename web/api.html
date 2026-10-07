@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MacNas 开发者 API · 用你自己的程序读写 MacNas</title>
+<meta name="description" content="MacNas 对外开放的 HTTP API：用 API Key 鉴权，读写文件、搜索、缩略图与预览。含快速上手、接口清单、错误码与限流说明。">
+<link rel="icon" href="logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="bg-deco" aria-hidden="true"></div>
+
+<header class="topbar glass">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">
+      <img src="logo.png" alt="MacNas" class="brand-logo">
+      <span class="brand-text">
+        <strong>MacNas</strong>
+        <small>开发者 API</small>
+      </span>
+    </a>
+    <nav class="topnav">
+      <a href="#quick">快速上手</a>
+      <a href="#read">读接口</a>
+      <a href="#write">写接口</a>
+      <a href="#errors">错误与限流</a>
+      <a href="#list">接口清单</a>
+    </nav>
+    <div class="topbar-actions">
+      <a class="btn text" href="index.html">← 返回介绍</a>
+      <a class="btn text" href="https://github.com/23456qwertyuiop/MacNas/blob/main/docs/API.md" target="_blank" rel="noopener">GitHub 文档</a>
+      <button class="icon-btn" id="theme-btn" title="切换深浅色" aria-label="切换深浅色"></button>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="hero">
+    <div class="hero-card glass">
+      <h1>开发者 API</h1>
+      <p class="hero-lead">
+        MacNas 对外开放一组 HTTP 接口：用一把 API Key，就能在自己的脚本或应用里
+        <strong>列目录、下载、搜索、上传、新建、改名、移动、删除</strong>。
+        接口是 JSON、带权限范围、按 key 限流，<code>/api/v1</code> 的字段只增不改。
+      </p>
+      <div class="hero-tags">
+        <span class="tag-pill">HTTP + JSON</span>
+        <span class="tag-pill">Bearer API Key</span>
+        <span class="tag-pill">只读 / 读写权限</span>
+        <span class="tag-pill">按 key 限流</span>
+        <span class="tag-pill">v1 稳定</span>
+      </div>
+      <div class="hero-actions">
+        <a class="btn filled" href="#quick">看快速上手</a>
+        <a class="btn text" href="https://github.com/23456qwertyuiop/MacNas/blob/main/docs/API.md" target="_blank" rel="noopener">完整文档（Markdown）</a>
+      </div>
+      <p class="hero-note">基础地址就是你 Mac 的局域网地址，例如 <code>http://192.168.1.20:7654</code></p>
+    </div>
+  </section>
+
+  <section id="quick" class="block">
+    <div class="section-head">
+      <span class="section-index">01</span>
+      <div>
+        <h2>快速上手</h2>
+        <p class="section-sub">三步：拿 key、调通第一个接口、开始批量处理。</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <div class="guide-steps">
+        <div class="guide-step">
+          <span class="guide-step-no">1</span>
+          <div>
+            <h3>在软件里生成一把 API Key</h3>
+            <p>MacNas →「设置」→「开发者 API」→ 填名字、勾权限（只读 / 读写）、可选有效期 →「生成」。
+               明文 key 只显示一次，请立刻保存。撤销也在这个页面，撤销后立即失效。</p>
+          </div>
+        </div>
+        <div class="guide-step">
+          <span class="guide-step-no">2</span>
+          <div>
+            <h3>调通第一个接口</h3>
+            <pre class="code-block"><code>export MACNAS="http://192.168.1.20:7654"
+export KEY="macnas_你保存下来的那一串"
+
+curl -s -H "Authorization: Bearer $KEY" "$MACNAS/api/v1/me"</code></pre>
+            <pre class="code-block"><code>{
+  "ok": true,
+  "apiVersion": "v1",
+  "caller": "我的备份脚本",
+  "scopes": ["read", "write"],
+  "volumeCount": 1
+}</code></pre>
+          </div>
+        </div>
+        <div class="guide-step">
+          <span class="guide-step-no">3</span>
+          <div>
+            <h3>拿到目录 id，开始干活</h3>
+            <pre class="code-block"><code>curl -s -H "Authorization: Bearer $KEY" "$MACNAS/api/v1/volumes"
+# → volumes[].id 就是后面所有接口要带的 volume 参数</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="read" class="block">
+    <div class="section-head">
+      <span class="section-index">02</span>
+      <div>
+        <h2>读接口（只读权限即可）</h2>
+        <p class="section-sub">列目录、下载、搜索、缩略图、预览。</p>
+      </div>
+    </div>
+
+    <div class="cards two">
+      <article class="card">
+        <h3>列目录</h3>
+        <pre class="code-block"><code>curl -s -H "Authorization: Bearer $KEY" \
+  "$MACNAS/api/v1/files?volume=$VOL&amp;path=/照片"</code></pre>
+        <p>返回 <code>folders</code> 与 <code>files</code> 两组，每个文件都带 <code>id</code>、
+           <code>path</code>、<code>size</code>、<code>sha256</code>、<code>createdAt</code>。</p>
+      </article>
+      <article class="card">
+        <h3>下载</h3>
+        <pre class="code-block"><code>curl -H "Authorization: Bearer $KEY" -o 海边.jpg \
+  "$MACNAS/api/v1/files/download?volume=$VOL&amp;id=$ID"</code></pre>
+        <p>支持 <code>Range</code>，可以断点续传；也可以直接用 <code>path=</code> 代替 <code>id=</code>。</p>
+      </article>
+      <article class="card">
+        <h3>搜索</h3>
+        <pre class="code-block"><code>curl -s -H "Authorization: Bearer $KEY" \
+  "$MACNAS/api/v1/search?q=海边"</code></pre>
+        <p>不传 <code>volume</code> 就搜所有目录，最多返回 200 条。</p>
+      </article>
+      <article class="card">
+        <h3>缩略图 / 预览</h3>
+        <pre class="code-block"><code>curl -H "Authorization: Bearer $KEY" -o t.jpg \
+  "$MACNAS/api/v1/thumbnails?volume=$VOL&amp;id=$ID&amp;size=256"</code></pre>
+        <p>缩略图是 JPEG；<code>/api/v1/preview</code> 给出该怎么渲染，
+           <code>/preview/content</code> 直接给内容（图片原图、文本、Word 转好的 HTML、其它格式的渲染图）。</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="write" class="block">
+    <div class="section-head">
+      <span class="section-index">03</span>
+      <div>
+        <h2>写接口（需要读写权限）</h2>
+        <p class="section-sub">上传、新建文件夹、重命名、移动/复制、删除。</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <article class="card">
+        <h3>上传（请求体就是文件本身，不是 multipart）</h3>
+        <pre class="code-block"><code>curl -H "Authorization: Bearer $KEY" -X POST \
+  --data-binary @本地文件.jpg \
+  "$MACNAS/api/v1/files/upload?volume=$VOL&amp;path=/照片&amp;name=新照片.jpg"</code></pre>
+        <p>同名默认<strong>自动改名</strong>（<code>新照片 (2).jpg</code>），要覆盖就加 <code>&amp;overwrite=1</code>。
+           内容在库里已存在时返回 <code>outcome: "deduplicated"</code> —— 记录建好了，但一个字节都没多占。</p>
+      </article>
+      <article class="card">
+        <h3>新建文件夹 / 重命名 / 移动 / 删除</h3>
+        <pre class="code-block"><code># 新建
+curl -s -H "Authorization: Bearer $KEY" -X POST -H 'Content-Type: application/json' \
+  -d '{"volume":"'$VOL'","path":"/","name":"归档"}' \
+  "$MACNAS/api/v1/folders"
+
+# 重命名
+curl -s -H "Authorization: Bearer $KEY" -X POST -H 'Content-Type: application/json' \
+  -d '{"volume":"'$VOL'","id":"'$ID'","name":"改名后.jpg"}' \
+  "$MACNAS/api/v1/files/rename"
+
+# 移动（mode 也可以填 copy）
+curl -s -H "Authorization: Bearer $KEY" -X POST -H 'Content-Type: application/json' \
+  -d '{"volume":"'$VOL'","ids":["'$ID'"],"toPath":"/归档","mode":"move"}' \
+  "$MACNAS/api/v1/files/move"
+
+# 删除（进回收站，用户还能还原）
+curl -s -H "Authorization: Bearer $KEY" -X DELETE \
+  "$MACNAS/api/v1/files?volume=$VOL&amp;id=$ID"</code></pre>
+      </article>
+      <div class="callout">
+        <p><strong>删除是进回收站</strong>，不是永久删除 —— 和你手动点「移到回收站」完全一样。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="errors" class="block">
+    <div class="section-head">
+      <span class="section-index">04</span>
+      <div>
+        <h2>错误与限流</h2>
+        <p class="section-sub">所有错误形状一致，方便你统一处理。</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <pre class="code-block"><code>{ "error": { "code": "read_only_key",
+             "message": "这个 API Key 只有只读权限，写操作被拒绝。" } }</code></pre>
+      <div class="table-wrap">
+        <table class="api-table">
+          <thead><tr><th>HTTP</th><th>code</th><th>含义</th></tr></thead>
+          <tbody>
+            <tr><td>400</td><td><code>missing_volume</code>, <code>bad_name</code>, <code>missing_target</code>, <code>missing_query</code>, <code>empty_body</code></td><td>参数不全或名字不合法</td></tr>
+            <tr><td>401</td><td><code>unauthorized</code>, <code>invalid_key</code></td><td>没带凭据 / key 不存在（多为没复制完整）</td></tr>
+            <tr><td>403</td><td><code>key_disabled</code>, <code>key_expired</code>, <code>read_only_key</code></td><td>key 被撤销、已过期，或用只读 key 调了写接口</td></tr>
+            <tr><td>404</td><td><code>not_found</code>, <code>unknown_volume</code></td><td>文件或目录不存在</td></tr>
+            <tr><td>405</td><td><code>method_not_allowed</code></td><td>方法用错了</td></tr>
+            <tr><td>429</td><td><code>rate_limited</code></td><td>请求太频繁，响应头带 <code>Retry-After</code>（秒）</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="cards two">
+        <article class="card">
+          <h3>限流</h3>
+          <p>每把 key 单独计算：<strong>读 600 次/分钟、写 120 次/分钟</strong>。
+             批量同步建议加并发上限，并遵守 <code>Retry-After</code>。</p>
+        </article>
+        <article class="card">
+          <h3>跨域（CORS）</h3>
+          <p>默认<strong>完全不开</strong>：key 落到浏览器页面里，等于把钥匙交给那个网页。
+             确实需要时，在「设置 → 开发者 API → 允许跨域来源」里填白名单。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="list" class="block">
+    <div class="section-head">
+      <span class="section-index">05</span>
+      <div>
+        <h2>接口清单</h2>
+        <p class="section-sub">前缀统一是 <code>/api/v1</code>。</p>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="api-table">
+        <thead><tr><th>方法</th><th>路径</th><th>权限</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>GET</td><td><code>/me</code></td><td>任意</td><td>key 信息与权限</td></tr>
+          <tr><td>GET</td><td><code>/volumes</code></td><td>只读</td><td>列出存储目录</td></tr>
+          <tr><td>GET</td><td><code>/stats</code></td><td>只读</td><td>空间统计（可带 volume）</td></tr>
+          <tr><td>GET</td><td><code>/files</code></td><td>只读</td><td>列目录</td></tr>
+          <tr><td>GET</td><td><code>/files/stat</code></td><td>只读</td><td>单个文件元信息</td></tr>
+          <tr><td>GET</td><td><code>/files/download</code></td><td>只读</td><td>下载（支持 Range）</td></tr>
+          <tr><td>GET</td><td><code>/search</code></td><td>只读</td><td>搜索</td></tr>
+          <tr><td>GET</td><td><code>/thumbnails</code></td><td>只读</td><td>缩略图</td></tr>
+          <tr><td>GET</td><td><code>/preview</code> · <code>/preview/content</code></td><td>只读</td><td>预览</td></tr>
+          <tr><td>POST</td><td><code>/files/upload</code></td><td>读写</td><td>上传</td></tr>
+          <tr><td>POST</td><td><code>/folders</code></td><td>读写</td><td>新建文件夹</td></tr>
+          <tr><td>POST</td><td><code>/files/rename</code></td><td>读写</td><td>重命名</td></tr>
+          <tr><td>POST</td><td><code>/files/move</code></td><td>读写</td><td>移动 / 复制</td></tr>
+          <tr><td>DELETE</td><td><code>/files</code> · POST <code>/files/delete</code></td><td>读写</td><td>删除（进回收站）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <p><strong>有意不开放的能力：</strong>改账号密码端口、创建/撤销分享链接、清空回收站与彻底删除、
+         移除存储目录与重建索引 —— 这些只能在本机软件里做，避免第三方误操作把系统搞乱。
+         需要的话到
+         <a href="https://github.com/23456qwertyuiop/MacNas/issues" target="_blank" rel="noopener">GitHub issue</a>
+         说明场景，我们评估在 v2 里加。</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="finale glass">
+      <h2>完整文档在仓库里</h2>
+      <p>这一页是速查。字段说明、更多示例、以及一份可直接改用的备份脚本，都在仓库的 <code>docs/API.md</code>。</p>
+      <div class="hero-actions">
+        <a class="btn filled" href="https://github.com/23456qwertyuiop/MacNas/blob/main/docs/API.md" target="_blank" rel="noopener">打开完整文档</a>
+        <a class="btn text" href="https://github.com/23456qwertyuiop/MacNas" target="_blank" rel="noopener">GitHub 仓库</a>
+        <a class="btn text" href="index.html">← 返回介绍</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <span>MacNas · 开发者 API</span>
+    <span class="c-dim">
+      <a href="index.html">介绍</a> ·
+      <a href="https://github.com/23456qwertyuiop/MacNas/blob/main/docs/API.md" target="_blank" rel="noopener">完整文档</a> ·
+      <a href="https://github.com/23456qwertyuiop/MacNas" target="_blank" rel="noopener">GitHub</a>
+    </span>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

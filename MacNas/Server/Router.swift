@@ -21,6 +21,19 @@ final class ServerEnvironment: @unchecked Sendable {
     /// 回收站保留天数（仅用于展示与自动清理）
     var trashRetentionDays: Int = 30
 
+    /// 允许跨域调用 API 的来源白名单（空 = 完全不开 CORS）
+    private var _apiCorsOrigins: [String] = []
+    func setAPICORSOrigins(_ origins: [String]) {
+        lock.lock()
+        _apiCorsOrigins = origins
+        lock.unlock()
+    }
+    var apiCorsOrigins: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _apiCorsOrigins
+    }
+
     /// 最近一次 WebDAV 客户端请求（用于「系统信息」里直接看到挂载方到底发了什么）
     private var _webdavLastClient: String = ""
     private var _webdavLastRequest: String = ""
@@ -104,12 +117,17 @@ final class Router: HTTPRequestHandler {
     private let assets = WebAssets()
     private let uploadsDirectory: URL
     private let environment: ServerEnvironment
+    /// 第三方开发者用的 API Key
+    let apiKeys: APIKeyStore
+    private var apiKeysFile = true   // 保留字段便于将来热切换
 
-    init(store: Store, auth: AuthManager, environment: ServerEnvironment, shares: ShareStore) {
+    init(store: Store, auth: AuthManager, environment: ServerEnvironment, shares: ShareStore,
+         apiKeys: APIKeyStore = APIKeyStore()) {
         self.store = store
         self.auth = auth
         self.environment = environment
         self.shares = shares
+        self.apiKeys = apiKeys
         self.webdav = WebDAVHandler(store: store, auth: auth, environment: environment)
         self.uploadsDirectory = AppPaths.uploadsDirectory
     }
@@ -124,6 +142,11 @@ final class Router: HTTPRequestHandler {
         }
         if head.method == "POST", head.path == "/api/upload" {
             let tempURL = tempDirectory.appendingPathComponent("upload-\(UUID().uuidString).part")
+            return try UploadBodySink(tempURL: tempURL)
+        }
+        // 第三方 API 上传：同样流式落盘 + 边收边算哈希
+        if head.method == "POST", head.path == "/api/v1/files/upload" {
+            let tempURL = tempDirectory.appendingPathComponent("api-\(UUID().uuidString).part")
             return try UploadBodySink(tempURL: tempURL)
         }
         // 照片收集：访客上传也走流式落盘（免登录，但要受收集链接的额度约束）
@@ -182,6 +205,23 @@ final class Router: HTTPRequestHandler {
         // GET / 仍然是网页。这样万一用户没在地址后面写 /dav，也不会莫名其妙挂不上。
         if path == "/", WebDAVHandler.webdavOnlyMethods.contains(request.method) {
             return webdav.handle(request)
+        }
+
+        // 第三方 API：/api/v1/*（Bearer 鉴权）与 /api/admin/keys（只允许已登录会话）
+        if path == "/api/v1" || path.hasPrefix("/api/v1/") || path.hasPrefix("/api/admin/keys") {
+            return try handleAPI(request)
+        }
+        // 跨域预检：只有在软件里配置了允许的来源才应答，默认一律不响应 CORS
+        if request.method == "OPTIONS", let origin = request.headers["origin"], path.hasPrefix("/api/") {
+            if let allowed = allowedCORSOrigin(origin) {
+                var response = HTTPResponse(status: 204, body: .empty)
+                response.headers["Access-Control-Allow-Origin"] = allowed
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+                response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-API-Key"
+                response.headers["Access-Control-Max-Age"] = "600"
+                return response
+            }
+            return .failure(403, "这个来源没有在软件里被允许跨域访问")
         }
 
         // OPTIONS：服务级能力查询（WebDAV 客户端会先发 OPTIONS，路径可能是 * 或任意前缀）
@@ -1144,6 +1184,420 @@ final class Router: HTTPRequestHandler {
         let volumeId = try writableVolumeID(request)
         let result = try store.compactIndex(volumeId: volumeId)
         return .json(["ok": true, "entries": result.entries, "bytes": result.bytes])
+    }
+
+
+    // MARK: - 第三方开发者 API（v1）
+
+    /// 调用方身份
+    private struct APICaller {
+        var keyId: String?
+        var name: String
+        var canWrite: Bool
+        var viaSession: Bool
+        /// 被限流时要直接返回的响应
+        var rateLimited: HTTPResponse?
+    }
+
+    /// API 统一错误格式：{"error": {"code": ..., "message": ...}}
+    private struct APIError: Error {
+        var status: Int
+        var code: String
+        var message: String
+    }
+
+    private func apiFailure(_ error: APIError) -> HTTPResponse {
+        .json(["error": ["code": error.code, "message": error.message]], status: error.status)
+    }
+
+    /// 允许跨域的来源（在软件里配置；为空表示完全不开 CORS）
+    private func allowedCORSOrigin(_ origin: String) -> String? {
+        let allowed = environment.apiCorsOrigins
+        guard !allowed.isEmpty else { return nil }
+        if allowed.contains("*") { return origin }
+        return allowed.contains(origin) ? origin : nil
+    }
+
+    /// 找出调用者：优先 Authorization: Bearer <key> / X-API-Key，其次已登录的网页会话
+    private func apiCaller(_ request: HTTPRequest) throws -> APICaller {
+        var token: String?
+        if let raw = request.headers["authorization"], raw.lowercased().hasPrefix("bearer ") {
+            token = String(raw.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+        } else if let raw = request.headers["x-api-key"], !raw.isEmpty {
+            token = raw.trimmingCharacters(in: .whitespaces)
+        }
+        if let token, !token.isEmpty {
+            guard let record = apiKeys.find(plaintext: token) else {
+                throw APIError(status: 401, code: "invalid_key",
+                               message: "API Key 无效。请检查是否复制完整，或它是否已被撤销。")
+            }
+            guard record.enabled else {
+                throw APIError(status: 403, code: "key_disabled", message: "这个 API Key 已被撤销。")
+            }
+            guard !record.isExpired else {
+                throw APIError(status: 403, code: "key_expired", message: "这个 API Key 已过期。")
+            }
+            // 限流：按 key 分别计读写
+            let writing = request.method != "GET" && request.method != "HEAD"
+            if case .limited(let retry) = apiKeys.checkRate(record, writing: writing) {
+                var response = apiFailure(APIError(status: 429, code: "rate_limited",
+                                                   message: "请求太频繁，请 \(retry) 秒后再试。"))
+                response.headers["Retry-After"] = String(retry)
+                return APICaller(keyId: record.id, name: record.name, canWrite: record.canWrite,
+                                 viaSession: false, rateLimited: response)
+            }
+            apiKeys.recordUse(id: record.id)
+            return APICaller(keyId: record.id, name: record.name, canWrite: record.canWrite, viaSession: false)
+        }
+        if auth.validate(token: request.cookies[AuthManager.cookieName]) {
+            // 网页登录的自己是完全权限，且不限流
+            return APICaller(keyId: nil, name: "网页登录", canWrite: true, viaSession: true)
+        }
+        throw APIError(status: 401, code: "unauthorized",
+                       message: "缺少凭据。请在请求头里加 Authorization: Bearer <你的 API Key>。")
+    }
+
+    private func requireWrite(_ caller: APICaller) throws {
+        guard caller.canWrite else {
+            throw APIError(status: 403, code: "read_only_key",
+                           message: "这个 API Key 只有只读权限，写操作被拒绝。")
+        }
+    }
+
+    private static func apiEntryPayload(_ entry: FileEntry, volumeId: String, store: Store) -> [String: Any] {
+        [
+            "id": entry.id,
+            "volumeId": volumeId,
+            "name": entry.name,
+            "path": entry.logicalPath,
+            "size": entry.size,
+            "sha256": entry.sha256,
+            "createdAt": ISO8601.string(entry.createdAt),
+            "isFolder": false,
+            "extension": (entry.name as NSString).pathExtension.lowercased()
+        ]
+    }
+
+    private func handleAPI(_ request: HTTPRequest) throws -> HTTPResponse {
+        let path = request.path
+        do {
+            var response = try apiRoute(request, path: path)
+            // 跨域：只有配置过的来源才带 CORS 头
+            if let origin = request.headers["origin"], let allowed = allowedCORSOrigin(origin) {
+                response.headers["Access-Control-Allow-Origin"] = allowed
+                response.headers["Vary"] = "Origin"
+            }
+            return response
+        } catch let error as APIError {
+            return apiFailure(error)
+        }
+    }
+
+    private func apiRoute(_ request: HTTPRequest, path: String) throws -> HTTPResponse {
+        // ---- key 管理：只允许已登录的网页会话（软件里的 API Key 页面也用这套）----
+        if path.hasPrefix("/api/admin/keys") {
+            guard auth.validate(token: request.cookies[AuthManager.cookieName]) else {
+                throw APIError(status: 401, code: "unauthorized", message: "管理 API Key 需要先在网页登录（或在软件里操作）。")
+            }
+            switch path {
+            case "/api/admin/keys":
+                if request.method == "GET" {
+                    return .json(["ok": true, "keys": apiKeys.all().map { $0.dictionary }])
+                }
+                if request.method == "POST" {
+                    let name = request.jsonString("name") ?? "未命名应用"
+                    let scopes = (request.jsonBody?["scopes"] as? [String]) ?? ["read"]
+                    let days = request.jsonBody?["expiresInDays"] as? Int
+                    let created = try apiKeys.create(name: name, scopes: scopes, expiresInDays: days)
+                    var payload = created.record.dictionary
+                    // 明文只在这里出现一次
+                    payload["key"] = created.plaintext
+                    return .json(["ok": true, "key": payload,
+                                  "note": "请立刻保存这个 key，之后无法再次查看。"], status: 201)
+                }
+            case "/api/admin/keys/revoke":
+                let id = try requireBody(request, "id")
+                guard apiKeys.revoke(id: id) else {
+                    throw APIError(status: 404, code: "not_found", message: "找不到这个 API Key。")
+                }
+                return .json(["ok": true])
+            default:
+                break
+            }
+            throw APIError(status: 404, code: "not_found", message: "接口不存在：\(path)")
+        }
+
+        // ---- /api/v1/*：开发者接口 ----
+        let caller = try apiCaller(request)
+        if let limited = caller.rateLimited { return limited }
+        let parts = path.split(separator: "/").map(String.init)
+        // ["api","v1", ...]
+        let rest = parts.dropFirst(2).joined(separator: "/")
+
+        switch rest {
+        case "", "me":
+            return .json([
+                "ok": true,
+                "api": "MacNas",
+                "apiVersion": "v1",
+                "caller": caller.name,
+                "scopes": caller.canWrite ? ["read", "write"] : ["read"],
+                "volumeCount": store.stats().volumeCount,
+                "docs": "https://github.com/23456qwertyuiop/MacNas/blob/main/docs/API.md"
+            ])
+
+        case "volumes":
+            let volumes = store.stats().volumeStats.map { volume -> [String: Any] in
+                ["id": volume.volumeId, "name": volume.name, "path": volume.path,
+                 "fileCount": volume.fileCount, "size": volume.logicalBytes,
+                 "available": volume.available, "readOnly": volume.readOnly]
+            }
+            return .json(["ok": true, "volumes": volumes])
+
+        case "stats":
+            let payload = store.analytics(volumeId: request.query["volume"]).dictionary
+            return .json(["ok": true, "stats": payload])
+
+        case "files":
+            // 同一个路径按方法分派：GET 列表、POST/DELETE 删除（删进回收站）
+            if request.method == "POST" || request.method == "DELETE" {
+                try requireWrite(caller)
+                let volumeId = try apiVolume(request)
+                let body = request.jsonBody ?? [:]
+                if let id = request.jsonString("id") ?? request.query["id"], !id.isEmpty {
+                    try store.deleteEntry(volumeId: volumeId, entryId: id)
+                    return .json(["ok": true, "deleted": id, "intoTrash": true])
+                }
+                if let raw = request.jsonString("path") ?? request.query["path"],
+                   !raw.isEmpty, LogicalPath.normalize(raw) != LogicalPath.root {
+                    try store.deleteFolder(volumeId: volumeId, path: LogicalPath.normalize(raw))
+                    return .json(["ok": true, "deleted": raw, "intoTrash": true])
+                }
+                throw APIError(status: 400, code: "missing_target",
+                               message: "请用 id 或 path 指定要删除的内容。")
+            }
+            guard request.method == "GET" else {
+                throw APIError(status: 405, code: "method_not_allowed",
+                               message: "列表用 GET，删除用 DELETE（或 POST /api/v1/files/delete）。")
+            }
+            let volumeId = try apiVolume(request)
+            let path = LogicalPath.normalize(request.query["path"] ?? LogicalPath.root)
+            let listing = try store.list(volumeId: volumeId, path: path)
+            let folders = listing.folders.map { folder -> [String: Any] in
+                ["name": folder.name, "path": folder.path, "fileCount": folder.fileCount, "isFolder": true]
+            }
+            let files = listing.files.map { Self.apiEntryPayload($0, volumeId: volumeId, store: store) }
+            return .json(["ok": true, "volumeId": volumeId, "path": listing.path,
+                          "folders": folders, "files": files])
+
+        case "files/stat":
+            let volumeId = try apiVolume(request)
+            guard let entry = try apiResolveEntry(request, volumeId: volumeId) else {
+                throw APIError(status: 404, code: "not_found", message: "文件不存在。")
+            }
+            return .json(["ok": true, "file": Self.apiEntryPayload(entry, volumeId: volumeId, store: store)])
+
+        case "files/download", "files/content":
+            let volumeId = try apiVolume(request)
+            guard let entry = try apiResolveEntry(request, volumeId: volumeId) else {
+                throw APIError(status: 404, code: "not_found", message: "文件不存在。")
+            }
+            let resolved = try store.resolveEntry(volumeId: volumeId, entryId: entry.id)
+            var response = FileResponse.make(request, entry: resolved.entry, url: resolved.url, inline: false)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+        case "files/upload":
+            guard request.method == "POST" else {
+                throw APIError(status: 405, code: "method_not_allowed", message: "上传请用 POST。")
+            }
+            try requireWrite(caller)
+            let volumeId = try apiVolume(request)
+            let directory = LogicalPath.normalize(request.query["path"] ?? LogicalPath.root)
+            guard let rawName = request.query["name"], let name = LogicalPath.sanitizedSegment(rawName) else {
+                throw APIError(status: 400, code: "bad_name", message: "请用 ?name=文件名 指定要写入的文件名。")
+            }
+            let tempURL: URL
+            let sha256: String
+            let size: Int64
+            switch request.body {
+            case .file(let url, let hash, let bytes):
+                tempURL = url; sha256 = hash; size = bytes
+            case .data(let data):
+                sha256 = FileHash.sha256(of: data); size = Int64(data.count)
+                tempURL = AppPaths.uploadsDirectory.appendingPathComponent("api-\(UUID().uuidString).part")
+                try? FileManager.default.createDirectory(at: AppPaths.uploadsDirectory, withIntermediateDirectories: true)
+                try data.write(to: tempURL)
+            case .none:
+                throw APIError(status: 400, code: "empty_body", message: "请求体里没有文件内容。")
+            }
+            let overwrite = (request.query["overwrite"] ?? "") == "1"
+            // 同名默认自动改名，避免开发者还要自己处理冲突
+            var finalName = name
+            if !overwrite {
+                var attempt = 2
+                while store.entry(volumeId: volumeId, logicalPath: LogicalPath.join(directory, finalName)) != nil {
+                    let ext = LogicalPath.fileExtension(for: name)
+                    let base = ext.isEmpty ? name : String(name.dropLast(ext.count + 1))
+                    finalName = ext.isEmpty ? "\(base) (\(attempt))" : "\(base) (\(attempt)).\(ext)"
+                    attempt += 1
+                    if attempt > 200 { break }
+                }
+            }
+            let result = try store.commitUpload(volumeId: volumeId, directory: directory, fileName: finalName,
+                                                sha256: sha256, size: size, tempFileURL: tempURL, overwrite: overwrite)
+            return .json(["ok": true,
+                          "file": Self.apiEntryPayload(result.entry, volumeId: volumeId, store: store),
+                          "outcome": result.outcome == .deduplicated ? "deduplicated" : "stored"], status: 201)
+
+        case "folders":
+            guard request.method == "POST" else {
+                throw APIError(status: 405, code: "method_not_allowed", message: "新建文件夹请用 POST。")
+            }
+            try requireWrite(caller)
+            let volumeId = try apiVolume(request)
+            let parent = LogicalPath.normalize(request.jsonString("path") ?? LogicalPath.root)
+            guard let name = LogicalPath.sanitizedSegment(request.jsonString("name") ?? "") else {
+                throw APIError(status: 400, code: "bad_name", message: "请用 name 指定文件夹名。")
+            }
+            let created = try store.createFolder(volumeId: volumeId, path: parent, name: name)
+            return .json(["ok": true, "folder": ["name": name, "path": created, "isFolder": true]], status: 201)
+
+        case "files/rename":
+            guard request.method == "POST" else {
+                throw APIError(status: 405, code: "method_not_allowed", message: "重命名请用 POST。")
+            }
+            try requireWrite(caller)
+            let volumeId = try apiVolume(request)
+            guard let name = LogicalPath.sanitizedSegment(request.jsonString("name") ?? "") else {
+                throw APIError(status: 400, code: "bad_name", message: "请用 name 指定新名字。")
+            }
+            if let id = request.jsonString("id"), !id.isEmpty {
+                guard let entry = store.entry(volumeId: volumeId, entryId: id) else {
+                    throw APIError(status: 404, code: "not_found", message: "文件不存在。")
+                }
+                try store.renameEntry(volumeId: volumeId, entryId: id, newName: name)
+                return .json(["ok": true, "from": entry.name, "name": name])
+            }
+            let from = try requireBody(request, "from")
+            try store.renameFolder(volumeId: volumeId, path: LogicalPath.normalize(from), newName: name)
+            return .json(["ok": true, "from": from, "name": name])
+
+        case "files/move":
+            guard request.method == "POST" else {
+                throw APIError(status: 405, code: "method_not_allowed", message: "移动/复制请用 POST。")
+            }
+            try requireWrite(caller)
+            let volumeId = try apiVolume(request)
+            guard let toPath = request.jsonString("toPath") else {
+                throw APIError(status: 400, code: "missing_toPath", message: "请用 toPath 指定目标目录。")
+            }
+            let body = request.jsonBody ?? [:]
+            let ids = (body["ids"] as? [String]) ?? []
+            let paths = (body["paths"] as? [String]) ?? []
+            guard !ids.isEmpty || !paths.isEmpty else {
+                throw APIError(status: 400, code: "nothing_selected", message: "请用 ids 或 paths 指定要移动的内容。")
+            }
+            let copy = (request.jsonString("mode") ?? "move") == "copy"
+            let result = try store.transfer(fromVolumeId: volumeId, entryIds: ids, folderPaths: paths,
+                                            toVolumeId: volumeId, toPath: LogicalPath.normalize(toPath),
+                                            copy: copy)
+            return .json(["ok": true, "mode": copy ? "copy" : "move",
+                          "moved": result.moved, "copied": result.copied, "renamed": result.renamed])
+
+        case "files/delete":
+            guard request.method == "POST" || request.method == "DELETE" else {
+                throw APIError(status: 405, code: "method_not_allowed", message: "删除请用 POST。")
+            }
+            try requireWrite(caller)
+            let volumeId = try apiVolume(request)
+            let body = request.jsonBody ?? [:]
+            if let id = request.jsonString("id") ?? request.query["id"], !id.isEmpty {
+                try store.deleteEntry(volumeId: volumeId, entryId: id)
+                return .json(["ok": true, "deleted": id, "intoTrash": true])
+            }
+            if let raw = request.jsonString("path") ?? request.query["path"],
+               !raw.isEmpty, LogicalPath.normalize(raw) != LogicalPath.root {
+                try store.deleteFolder(volumeId: volumeId, path: LogicalPath.normalize(raw))
+                return .json(["ok": true, "deleted": raw, "intoTrash": true])
+            }
+            throw APIError(status: 400, code: "missing_target", message: "请用 id 或 path 指定要删除的内容。")
+
+        case "search":
+            let query = (request.query["q"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty else {
+                throw APIError(status: 400, code: "missing_query", message: "请用 ?q= 指定搜索词。")
+            }
+            let found = store.search(query: query, volumeId: request.query["volume"], limit: 200)
+            let payload = found.hits.map { hit -> [String: Any] in
+                var item: [String: Any] = ["kind": hit.kind, "name": hit.name, "path": hit.logicalPath,
+                                           "volumeId": hit.volumeId, "volumeName": hit.volumeName,
+                                           "size": hit.size, "fileCount": hit.fileCount]
+                if let id = hit.entryId { item["id"] = id }
+                if let createdAt = hit.createdAt { item["createdAt"] = ISO8601.string(createdAt) }
+                return item
+            }
+            return .json(["ok": true, "query": query, "results": payload])
+
+        case "thumbnails":
+            let volumeId = try apiVolume(request)
+            guard let entry = try apiResolveEntry(request, volumeId: volumeId) else {
+                throw APIError(status: 404, code: "not_found", message: "文件不存在。")
+            }
+            let resolved = try store.resolveEntry(volumeId: volumeId, entryId: entry.id)
+            let size = max(32, min(1024, Int(request.query["size"] ?? "256") ?? 256))
+            let image = try PreviewService.shared.thumbnail(fileURL: resolved.url,
+                                                            cacheKey: entry.sha256,
+                                                            maxPixel: size)
+            var response = HTTPResponse(status: 200, body: .data(image.data))
+            response.headers["Content-Type"] = image.mime
+            response.headers["Cache-Control"] = "public, max-age=86400"
+            return response
+
+        case "preview":
+            let volumeId = try apiVolume(request)
+            guard let entry = try apiResolveEntry(request, volumeId: volumeId) else {
+                throw APIError(status: 404, code: "not_found", message: "文件不存在。")
+            }
+            let resolved = try store.resolveEntry(volumeId: volumeId, entryId: entry.id)
+            return previewMetaResponse(request,
+                                       target: PreviewTarget(entry: resolved.entry, url: resolved.url),
+                                       volumeId: volumeId)
+
+        case "preview/content":
+            let volumeId = try apiVolume(request)
+            guard let entry = try apiResolveEntry(request, volumeId: volumeId) else {
+                throw APIError(status: 404, code: "not_found", message: "文件不存在。")
+            }
+            let resolved = try store.resolveEntry(volumeId: volumeId, entryId: entry.id)
+            return try previewContentResponse(request, target: PreviewTarget(entry: resolved.entry, url: resolved.url))
+
+        default:
+            throw APIError(status: 404, code: "not_found",
+                           message: "接口不存在：\(path)。可用接口见 docs/API.md。")
+        }
+    }
+
+    private func apiVolume(_ request: HTTPRequest) throws -> String {
+        let volumeId = request.query["volume"] ?? request.jsonString("volume") ?? ""
+        guard !volumeId.isEmpty else {
+            throw APIError(status: 400, code: "missing_volume", message: "请用 ?volume=<目录 id> 指定要操作的目录，可用 /api/v1/volumes 获取。")
+        }
+        guard store.volume(id: volumeId) != nil else {
+            throw APIError(status: 404, code: "unknown_volume", message: "找不到这个目录（volume）。")
+        }
+        return volumeId
+    }
+
+    private func apiResolveEntry(_ request: HTTPRequest, volumeId: String) throws -> FileEntry? {
+        if let id = request.query["id"] ?? request.jsonString("id"), !id.isEmpty {
+            return store.entry(volumeId: volumeId, entryId: id)
+        }
+        if let path = request.query["path"] ?? request.jsonString("path"),
+           LogicalPath.normalize(path) != LogicalPath.root {
+            return store.entry(volumeId: volumeId, logicalPath: LogicalPath.normalize(path))
+        }
+        return nil
     }
 
     // MARK: - 空间分析

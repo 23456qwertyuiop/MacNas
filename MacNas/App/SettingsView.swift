@@ -19,6 +19,12 @@ struct SettingsView: View {
     @State private var webdavEnabled = true
     @State private var webdavReadOnly = false
     @State private var trashDays = 30
+    @State private var newKeyName = ""
+    @State private var newKeyWrite = false
+    @State private var newKeyDays = 0
+    @State private var freshKeyPlaintext: String?
+    @State private var corsField = ""
+    @State private var corsSaved = false
     @State private var mirrorReport: String?
     @State private var mirrorError = false
     @State private var mirrorHardlink = true
@@ -34,6 +40,7 @@ struct SettingsView: View {
             VStack(spacing: 16) {
                 accountCard
                 portCard
+                apiCard
                 fastWriteCard
                 mirrorCard
                 trashCard
@@ -105,6 +112,162 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    // MARK: - 开发者 API
+
+    private var apiCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 14) {
+                SectionTitle(text: "开发者 API",
+                             subtitle: "给外部程序用的 HTTP 接口：列目录、下载、搜索、上传、改名、移动、删除")
+
+                Text("文档见仓库的 docs/API.md，或介绍站的「开发者 API」页面。接口前缀 /api/v1，用下面的 key 鉴权（Bearer）。删除操作只进回收站，第三方无法彻底删除或清空回收站。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // 已有 key 列表
+                if app.apiKeysList.isEmpty {
+                    Text("还没有生成过 API Key。")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(app.apiKeysList, id: \.id) { key in
+                            HStack(spacing: 10) {
+                                Image(systemName: key.canWrite ? "key.fill" : "key")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(key.enabled && !key.isExpired ? Palette.accent : Palette.warning)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(key.name).font(.system(size: 12, weight: .medium))
+                                    Text(keyDetailText(key))
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Button("撤销") { app.revokeAPIKey(id: key.id) }
+                                    .buttonStyle(SecondaryButtonStyle())
+                            }
+                        }
+                    }
+                }
+
+                Divider().opacity(0.4)
+
+                // 新建
+                HStack(spacing: 10) {
+                    TextField("应用名字，例如：我的备份脚本", text: $newKeyName)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                    Toggle("读写权限", isOn: $newKeyWrite)
+                        .toggleStyle(.switch)
+                        .font(.system(size: 11.5))
+                        .help("关掉表示只读：只能列目录、下载、搜索、看预览")
+                    HStack(spacing: 4) {
+                        Text("有效").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        TextField("0", value: $newKeyDays, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 46)
+                            .font(.system(size: 11.5))
+                        Text("天").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    }
+                    Button("生成 Key") {
+                        let scopes = newKeyWrite ? ["read", "write"] : ["read"]
+                        if let created = app.createAPIKey(name: newKeyName,
+                                                          scopes: scopes,
+                                                          expiresInDays: newKeyDays > 0 ? newKeyDays : nil) {
+                            freshKeyPlaintext = created.plaintext
+                            newKeyName = ""
+                        }
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                }
+
+                if let freshKeyPlaintext {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("这把 key 只显示这一次，请立刻复制走：")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Palette.warning)
+                        HStack(spacing: 8) {
+                            Text(freshKeyPlaintext)
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Button("复制") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(freshKeyPlaintext, forType: .string)
+                                app.toast = "API Key 已复制"
+                            }
+                            .buttonStyle(SecondaryButtonStyle())
+                            Button("知道了") { self.freshKeyPlaintext = nil }
+                                .buttonStyle(SecondaryButtonStyle())
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Palette.warning.opacity(0.1)))
+                    }
+                }
+
+                Divider().opacity(0.4)
+
+                // 跨域白名单
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("允许跨域调用 API 的来源（可选）")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("默认不开 CORS：API Key 落到浏览器页面里等于把钥匙交给那个网页。只有你信任的网页才填进来，多个用逗号分隔，例如 http://localhost:5173")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        TextField("留空表示不开放跨域", text: $corsField)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11.5))
+                        Button("保存") {
+                            let origins = corsField
+                                .split(separator: ",")
+                                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                .filter { !$0.isEmpty }
+                            app.setAPICORSOrigins(origins)
+                            corsSaved = true
+                            app.toast = origins.isEmpty ? "已关闭跨域访问" : "已允许 \(origins.count) 个来源跨域访问"
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                    }
+                    if corsSaved {
+                        Text(app.config.apiCorsOrigins.isEmpty
+                             ? "当前：不开放跨域"
+                             : "当前允许：" + app.config.apiCorsOrigins.joined(separator: "、"))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            corsField = app.config.apiCorsOrigins.joined(separator: ", ")
+        }
+    }
+
+    private func keyDetailText(_ key: APIKeyRecord) -> String {
+        var parts = [key.prefix, key.canWrite ? "读写" : "只读"]
+        if key.isExpired {
+            parts.append("已过期")
+        } else if let expiresAt = key.expiresAt {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM-dd"
+            parts.append("至 " + formatter.string(from: expiresAt))
+        }
+        parts.append("调用 \(key.requestCount) 次")
+        if let last = key.lastUsedAt {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM-dd HH:mm"
+            parts.append("最后 " + formatter.string(from: last))
+        } else {
+            parts.append("还没用过")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private var fastWriteCard: some View {

@@ -147,6 +147,6 @@ enum SchemaFields {
 
     static let config: Set<String> = [
         "version", "formatVersion", "initialized", "username", "passwordSalt", "passwordHash",
-        "port", "volumes", "autoStartServer", "webdavEnabled", "webdavReadOnly", "trashRetentionDays"
+        "port", "volumes", "autoStartServer", "webdavEnabled", "webdavReadOnly", "trashRetentionDays", "apiCorsOrigins"
     ]
 }

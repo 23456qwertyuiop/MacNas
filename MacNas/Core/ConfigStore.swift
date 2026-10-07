@@ -26,6 +26,8 @@ struct AppConfig: Codable {
     var webdavReadOnly: Bool = false
     /// 回收站保留天数（超期自动清理；0 表示不自动清理）
     var trashRetentionDays: Int = 30
+    /// 允许跨域调用 /api/v1 的来源白名单（空 = 不开 CORS；填 "*" 表示允许任意来源）
+    var apiCorsOrigins: [String] = []
 
     static let defaultPort: UInt16 = 8080
 }
